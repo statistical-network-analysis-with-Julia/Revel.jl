@@ -83,9 +83,10 @@ interactions, goodness-of-fit diagnostics and relational hyperevents.
   with nothing in memory is `empty`.
 - The rem, goldfish and eventnet columns of `effect_catalogue` follow those
   packages' documentation and are not checked numerically.
-- `Networks.newton_fit` allows ten step halvings; a rare indicator statistic
-  with a large coefficient next to a near-duplicate term can need more, and the
-  fit then reports `converged == false`.
+- With a Networks.jl checkout from before its `newton_fit` step-halving limit
+  was raised from 10 to 30 (2026-09-30), a rare indicator statistic with a large
+  coefficient next to a near-duplicate term can stop a fit after two iterations
+  with `converged == false`.
 - Layers store dense `n × n` matrices and cache the history they were last
   evaluated on; a statistic must not be shared between concurrently fitting
   tasks.

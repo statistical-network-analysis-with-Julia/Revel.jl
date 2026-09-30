@@ -158,9 +158,10 @@ entry in `Networks.approximations(fit)`. Three causes are worth telling apart:
 - **Collinearity** — [`statistic_collinearity`](@ref) before fitting.
 - **Separation** — a statistic that perfectly predicts the events; the estimator
   names it.
-- **An overshooting first step.** The shared Newton optimizer starts at zero and
-  halves a step at most ten times. A statistic that is a rare indicator with a
-  large true coefficient — a participation shift in conversational data — can
-  need more, in which case the fit stops after two iterations with coefficients
-  that are plainly not estimates. Dropping a near-duplicate term (an immediate
-  reply and a recency rank measure much the same thing) usually resolves it.
+- **An overshooting first step.** The shared Newton optimizer starts at zero
+  and halves a step a limited number of times — ten in Networks.jl checkouts
+  older than 2026-09-30, thirty since. A statistic that is a rare indicator with
+  a large true coefficient — a participation shift in conversational data —
+  needed eleven on the radio-call data, and under the old limit the fit stopped
+  after two iterations with coefficients that were plainly not estimates. If a
+  fit behaves that way, update Networks.jl.

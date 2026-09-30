@@ -8,7 +8,7 @@ Revel.jl adds relational event effects, effect × covariate interactions, goodne
 
 It depends on the sibling checkouts `../Networks.jl`, `../REM.jl` and `../Relevent.jl` through `[sources]` paths; `../ERGM.jl`, `../SNA.jl` and `../Siena.jl` are test-only (the co-loading test).
 
-The package was created on 2026-09-30 and has not been committed or published: until the directory is a git repository with a commit, the Documenter build fails at `git rev-parse HEAD` (build it from a throwaway clone), and CI cannot clone it as a sibling.
+The package was created on 2026-09-30. The Documenter build needs a git checkout with at least one commit (`git rev-parse HEAD`).
 
 ## Development Commands
 
