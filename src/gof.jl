@@ -1,0 +1,759 @@
+# =============================================================================
+# Goodness of fit and diagnostics
+# =============================================================================
+#
+# The reviews agree that REM goodness of fit is unsettled — "there exists no
+# general consensus regarding a formal testing paradigm" (Bianchi, Filippi-
+# Mazzola, Lomi & Wit 2024) — and the literature offers three families of
+# proposals, all of which are here:
+#
+#   prediction     how highly did the model rank what happened? (Butts 2008's
+#                  deviance residuals and classification; Brandenberger 2019)
+#                  → event_diagnostics, prediction_summary
+#   residuals      cumulative score (martingale-residual) processes (Boschi &
+#                  Wit 2025, after Lin, Wei & Ying 1993) and the score test for
+#                  an omitted effect
+#                  → score_process_test, score_test
+#   simulation     auxiliary statistics of sequences simulated from the fit
+#                  (Amati, Lomi & Snijders 2024)
+#                  → gof, mechanism_shares, closing_times
+#
+# plus the specification diagnostic the reviews ask for and no source supplies:
+# collinearity among the statistics (`statistic_collinearity`).
+
+function _require_ordinal(fit::RevelFit, what::AbstractString)
+    fit.model === :ordinal || throw(ArgumentError(
+        "$what is defined for the ordinal (partial-likelihood) model. The " *
+        "coefficients of an interval-timing fit do not maximise the partial " *
+        "likelihood, so its score process is not centred; refit with " *
+        "model=:ordinal to use this diagnostic."))
+    return nothing
+end
+
+# The tie policy to REBUILD the fit's risk sets with (`:batch` freezes the
+# history across a tie block exactly as `:breslow` does)
+_rebuild_ties(fit::RevelFit) = fit.ties === :batch ? :breslow : fit.ties
+
+_fit_risk_sets(f, fit::RevelFit; statistics=fit.statistics, cases=fit.cases) =
+    each_risk_set(f, fit.events, statistics, fit.n_actors; directed=fit.directed,
+                  riskset=fit.riskset, ties=_rebuild_ties(fit), cases=cases)
+
+# Fitted probabilities over a risk set (Efron-weighted where a tie correction
+# applies); returns the log of the normalising constant
+function _risk_set_probs!(probs::Vector{Float64}, η::Vector{Float64}, v::RiskSetView,
+                          θ::Vector{Float64})
+    D = length(v.dyads)
+    ηmax = -Inf
+    @inbounds for d in 1:D
+        acc = 0.0
+        for k in eachindex(θ)
+            acc += θ[k] * v.X[d, k]
+        end
+        η[d] = acc
+        ηmax = max(ηmax, acc)
+    end
+    @inbounds for d in 1:D
+        probs[d] = exp(η[d] - ηmax)
+    end
+    if v.tie_weight != 1.0
+        @inbounds for d in v.tied
+            probs[d] *= v.tie_weight
+        end
+    end
+    Z = 0.0
+    @inbounds for d in 1:D
+        Z += probs[d]
+    end
+    @inbounds for d in 1:D
+        probs[d] /= Z
+    end
+    return ηmax + log(Z)
+end
+
+"""
+    event_diagnostics(fit::RevelFit; cases=fit.cases) -> DataFrame
+
+How the fitted model scored each event: one row per event with
+
+- `event_index`, `time`, `sender`, `receiver`, `risk_set_size`;
+- `probability` — the fitted probability of the observed dyad among its risk set;
+- `rank` — its rank by fitted rate (1 = the model's first choice; ties share the
+  average rank);
+- `rank_fraction` — `(rank − 1)/(risk set size − 1)`, from 0 (top) to 1;
+- `deviance_residual` — `−2 log(probability)`, Butts's (2008) deviance residual;
+- `null_residual` — `2 log(risk set size)`, the residual of the model with no
+  effects, under which every dyad is equally likely;
+- `surprise` — `−log₂(probability)` in bits.
+
+Events with a large deviance residual are the ones the model did not see coming;
+read against the sequence they show *where* a specification fails (a phase of
+the process, a group of actors), which a single fit index cannot.
+
+`cases` selects the events to score (indices into `fit.events`, a mask or a
+predicate). Passing events that were held out of the fit gives **out-of-sample**
+prediction, the basis of the fit assessment of Brandenberger (2019): fit on
+`cases=1:k`, score `cases=(k+1):n`.
+
+# Example
+```julia
+using Revel, Random
+stats = [Inertia(transform=:log1p), Reciprocation(transform=:log1p)]
+events = simulate_events(stats, [1.0, 0.5], 6, 200; rng=Xoshiro(1))
+train = fit_revel(events, stats, 6; cases=1:150)
+held_out = event_diagnostics(train; cases=151:200)
+size(held_out, 1)                          # 50
+all(0 .< held_out.probability .<= 1)       # true
+```
+"""
+function event_diagnostics(fit::RevelFit{F, T}; cases=fit.cases) where {F, T}
+    θ = collect(Float64, _effect_coef(fit))
+    index = Int[]; time = T[]
+    sender = Int[]; receiver = Int[]; size_ = Int[]
+    prob = Float64[]; rank = Float64[]; frac = Float64[]
+    η = Float64[]; probs = Float64[]
+    _fit_risk_sets(fit; cases=cases) do v
+        D = length(v.dyads)
+        length(η) < D && (resize!(η, D); resize!(probs, D))
+        _risk_set_probs!(probs, η, v, θ)
+        ηc = η[v.case]
+        greater = 0; equal = 0
+        @inbounds for d in 1:D
+            greater += η[d] > ηc
+            equal += η[d] == ηc
+        end
+        rk = greater + (equal + 1) / 2
+        push!(index, v.index); push!(time, v.event.time)
+        push!(sender, v.event.sender); push!(receiver, v.event.receiver)
+        push!(size_, D); push!(prob, probs[v.case]); push!(rank, rk)
+        push!(frac, (rk - 1) / (D - 1))
+    end
+    return DataFrame(event_index=index, time=time, sender=sender, receiver=receiver,
+                     risk_set_size=size_, probability=prob, rank=rank,
+                     rank_fraction=frac, deviance_residual=-2 .* log.(prob),
+                     null_residual=2 .* log.(size_), surprise=-log2.(prob))
+end
+
+"""
+    prediction_summary(fit::RevelFit; ks=(1, 5, 10), cases=fit.cases) -> NamedTuple
+
+Predictive fit of a relational event model, summarised over events:
+
+- `n_events`;
+- `recall` — for each `k` in `ks`, the share of events whose observed dyad was
+  among the model's top `k` (an integer `k`) or its top fraction `k` of the risk
+  set (a `k` in `(0, 1)`). `recall` at 1 is the classification accuracy of Butts
+  (2008); the recall of the top 5 % is the prediction measure of Brandenberger
+  (2019) and of the remstats tutorials;
+- `mean_rank`, `median_rank`, `mean_reciprocal_rank`, `mean_rank_fraction`;
+- `deviance` and `null_deviance` — sums of the residuals of
+  [`event_diagnostics`](@ref);
+- `pseudo_r2` — `1 − deviance/null_deviance`, the share of the null deviance the
+  effects account for (Perry & Wolfe 2013 report their models this way);
+- `perplexity` — `2^(mean surprise)`, the effective number of equally likely
+  dyads the model leaves.
+
+Computed on the fitted events these are in-sample; pass held-out `cases` for an
+honest comparison between specifications.
+
+# Example
+```julia
+using Revel, Random
+stats = [Inertia(transform=:log1p), Reciprocation(transform=:log1p)]
+events = simulate_events(stats, [1.0, 0.5], 6, 200; rng=Xoshiro(1))
+summary = prediction_summary(fit_revel(events, stats, 6); ks=(1, 3, 0.2))
+summary.n_events                 # 200
+0 < summary.pseudo_r2 < 1        # true
+summary.recall                   # share of events in the top 1, top 3, top 20 %
+```
+"""
+function prediction_summary(fit::RevelFit; ks=(1, 5, 10), cases=fit.cases)
+    d = event_diagnostics(fit; cases=cases)
+    n = size(d, 1)
+    n > 0 || throw(ArgumentError("no events to summarise"))
+    recall = Float64[]
+    for k in ks
+        if k isa Integer
+            k >= 1 || throw(ArgumentError("an integer k must be at least 1"))
+            push!(recall, count(<=(k), d.rank) / n)
+        else
+            0 < k < 1 || throw(ArgumentError(
+                "a fractional k must lie strictly between 0 and 1, got $k"))
+            push!(recall, count(i -> d.rank[i] <= max(1.0, k * d.risk_set_size[i]), 1:n) / n)
+        end
+    end
+    deviance = sum(d.deviance_residual)
+    null_deviance = sum(d.null_residual)
+    return (n_events=n, ks=collect(ks), recall=recall, mean_rank=mean(d.rank),
+            median_rank=median(d.rank), mean_reciprocal_rank=mean(1 ./ d.rank),
+            mean_rank_fraction=mean(d.rank_fraction), deviance=deviance,
+            null_deviance=null_deviance, pseudo_r2=1 - deviance / null_deviance,
+            perplexity=2.0^mean(d.surprise))
+end
+
+# -----------------------------------------------------------------------------
+# Score (martingale-residual) processes
+# -----------------------------------------------------------------------------
+
+# Per-event score contributions u_m = x_case − E[x] and information matrices
+# V_m = Cov(x) under the fitted probabilities
+function _score_components(fit::RevelFit, statistics, θ::Vector{Float64})
+    p = length(θ)
+    U = Vector{Vector{Float64}}()
+    V = Vector{Matrix{Float64}}()
+    η = Float64[]; probs = Float64[]
+    xbar = zeros(p)
+    _fit_risk_sets(fit; statistics=statistics) do v
+        D = length(v.dyads)
+        length(η) < D && (resize!(η, D); resize!(probs, D))
+        _risk_set_probs!(probs, η, v, θ)
+        fill!(xbar, 0.0)
+        @inbounds for k in 1:p, d in 1:D
+            xbar[k] += probs[d] * v.X[d, k]
+        end
+        u = [v.X[v.case, k] - xbar[k] for k in 1:p]
+        Vm = zeros(p, p)
+        @inbounds for l in 1:p, k in 1:l
+            acc = 0.0
+            for d in 1:D
+                acc += probs[d] * (v.X[d, k] - xbar[k]) * (v.X[d, l] - xbar[l])
+            end
+            Vm[k, l] = acc
+            Vm[l, k] = acc
+        end
+        push!(U, u); push!(V, Vm)
+    end
+    return U, V
+end
+
+function _require_full_design(fit::RevelFit, what::AbstractString)
+    fit.n_controls === nothing || throw(ArgumentError(
+        "$what needs the score of the likelihood that was maximised, which for a " *
+        "fit with sampled controls (n_controls=$(fit.n_controls)) is the sampled " *
+        "one. Refit without `n_controls` to use it."))
+    return nothing
+end
+
+"""
+    score_process_test(fit::RevelFit; n_sim=1000, rng=Random.default_rng(),
+                       return_process=false)
+
+Test whether each effect is **constant over the event sequence** with the
+cumulative score process — the cumulative sum, over events, of the difference
+between the observed statistic and its expectation under the fitted model (the
+martingale residuals of the model). Under a correctly specified model the
+process wanders around zero and returns to it; an effect that strengthens or
+fades over the sequence, or a misspecified functional form, makes it drift.
+
+This is the residual-based goodness-of-fit approach of Boschi & Wit (2025),
+implemented as the score-process test of Lin, Wei & Ying (1993) for the Cox
+model that a relational event model is: the supremum of the absolute process is
+compared with `n_sim` realisations of its null distribution, generated by the
+multiplier (Gaussian) resampling that accounts for the coefficients being
+estimated.
+
+Returns a `DataFrame` with one row per effect — `term`, `statistic` (the
+supremum of the standardised process), `p_value` (resampling), `p_kolmogorov`
+(the Brownian-bridge approximation, adequate when the statistics are close to
+uncorrelated), `at_event` (where the supremum occurs) — and a final `GLOBAL` row
+whose p-value is the Bonferroni combination. With `return_process=true` the
+result is `(table, process)`, `process` being the `events × effects` matrix of
+standardised processes for plotting.
+
+A small p-value says the effect is not constant; [`fit_moving_window`](@ref)
+shows how it moves. Defined for ordinal fits on the full (unsampled) risk set.
+
+# Example
+```julia
+using Revel, Random
+stats = [Inertia(transform=:log1p), Reciprocation(transform=:log1p)]
+events = simulate_events(stats, [1.0, 0.5], 6, 200; rng=Xoshiro(1))
+test = score_process_test(fit_revel(events, stats, 6); n_sim=200, rng=Xoshiro(2))
+test.term                          # ["log1p(inertia)", "log1p(reciprocity)", "GLOBAL"]
+all(0 .<= test.p_value .<= 1)      # true
+```
+"""
+function score_process_test(fit::RevelFit; n_sim::Int=1000,
+                            rng::AbstractRNG=Random.default_rng(),
+                            return_process::Bool=false)
+    _require_ordinal(fit, "score_process_test")
+    _require_full_design(fit, "score_process_test")
+    n_sim >= 1 || throw(ArgumentError("n_sim must be at least 1"))
+    θ = collect(Float64, coef(fit))
+    p = length(θ)
+    U, V = _score_components(fit, fit.statistics, θ)
+    E = length(U)
+    info = sum(V)
+    info_inv = try
+        inv(Symmetric(info))
+    catch
+        throw(ArgumentError(
+            "the information matrix of the fit is singular; the score process " *
+            "cannot be standardised (check the model for collinear statistics)"))
+    end
+    scale = [sqrt(max(info_inv[k, k], 0.0)) for k in 1:p]
+
+    # Observed process and the cumulative information it is projected with
+    process = Matrix{Float64}(undef, E, p)
+    cum = zeros(p)
+    for m in 1:E
+        cum .+= U[m]
+        process[m, :] .= cum .* scale
+    end
+    observed = [maximum(abs, view(process, :, k)) for k in 1:p]
+    at = [_fit_index(fit, argmax(abs.(view(process, :, k)))) for k in 1:p]
+
+    # Lin–Wei–Ying multipliers: Ŵ(m) = Σ_{l≤m} u_l G_l − I(m) I⁻¹ Σ_l u_l G_l
+    exceed = zeros(Int, p)
+    G = Vector{Float64}(undef, E)
+    total = zeros(p); partial = zeros(p); cumV = zeros(p, p); shift = zeros(p)
+    for _ in 1:n_sim
+        randn!(rng, G)
+        fill!(total, 0.0)
+        for m in 1:E
+            total .+= U[m] .* G[m]
+        end
+        correction = info_inv * total
+        fill!(partial, 0.0); fill!(cumV, 0.0)
+        sup = zeros(p)
+        for m in 1:E
+            partial .+= U[m] .* G[m]
+            cumV .+= V[m]
+            mul!(shift, cumV, correction)
+            for k in 1:p
+                sup[k] = max(sup[k], abs((partial[k] - shift[k]) * scale[k]))
+            end
+        end
+        for k in 1:p
+            exceed[k] += sup[k] >= observed[k]
+        end
+    end
+    p_value = [(1 + exceed[k]) / (n_sim + 1) for k in 1:p]
+    p_kolmogorov = [ccdf(Kolmogorov(), observed[k]) for k in 1:p]
+
+    names = [name(s) for s in fit.statistics]
+    table = DataFrame(term=[names; "GLOBAL"],
+                      statistic=[observed; maximum(observed)],
+                      p_value=[p_value; min(1.0, p * minimum(p_value))],
+                      p_kolmogorov=[p_kolmogorov; min(1.0, p * minimum(p_kolmogorov))],
+                      at_event=[at; at[argmax(observed)]])
+    return return_process ? (table, process) : table
+end
+
+# Position in the time-sorted sequence of the fit's `k`-th case
+function _fit_index(fit::RevelFit, k::Int)
+    fit.cases === nothing && return k
+    return findall(fit.cases)[k]
+end
+
+"""
+    score_test(fit::RevelFit, candidates) -> DataFrame
+
+Rao score tests for effects that are **not** in the model: for each candidate
+statistic, would adding it improve the fit? The test needs only the fitted
+model — nothing is refitted — so a whole catalogue of candidate effects can be
+screened in one pass over the risk sets.
+
+Each row gives the candidate's `term`, its `score` (the sum over events of
+observed minus expected statistic, at the fitted coefficients), the score's
+`variance` after adjusting for the effects already in the model, the `chisq`
+statistic (one degree of freedom), its `p_value`, and `direction` — the sign the
+candidate's coefficient would take. A candidate that is collinear with the
+fitted effects has no variance left to test and gets `NaN`.
+
+This is goodness-of-fit-driven effect discovery, and it is also the honest way
+to apply the literature's hierarchy principle: fit the lower-order terms (degree,
+repetition — ideally actor heterogeneity) and ask whether a triadic term still
+has something to explain, rather than reading a closure coefficient from a model
+that omits them (Juozaitienė & Wit 2024 on "ghost" triadic effects). Candidates
+are tested one at a time, not jointly; screening many of them calls for a
+multiplicity correction. Defined for ordinal fits on the full risk set.
+
+# Example
+```julia
+using Revel, Random
+truth = [Inertia(transform=:log1p), Reciprocation(transform=:log1p)]
+events = simulate_events(truth, [1.0, 1.0], 6, 300; rng=Xoshiro(1))
+small = fit_revel(events, [Inertia(transform=:log1p)], 6)
+screen = score_test(small, [Reciprocation(transform=:log1p), OTP(transform=:log1p)])
+screen.term                        # ["log1p(reciprocity)", "log1p(otp)"]
+screen.p_value[1] < 0.05           # true — reciprocity was left out
+```
+"""
+function score_test(fit::RevelFit, candidates)
+    _require_ordinal(fit, "score_test")
+    _require_full_design(fit, "score_test")
+    cands = candidates isa AbstractStatistic ? AbstractStatistic[candidates] :
+            collect(AbstractStatistic, candidates)
+    isempty(cands) && throw(ArgumentError("no candidate statistics to test"))
+    all_stats = AbstractStatistic[fit.statistics; cands]
+    _stat_names(all_stats)
+    p = length(fit.statistics); q = length(cands)
+    θ = [collect(Float64, coef(fit)); zeros(q)]
+    U, V = _score_components(fit, all_stats, θ)
+    score = sum(U)
+    info = sum(V)
+    Ixx = Symmetric(info[1:p, 1:p])
+    Ixx_inv = try
+        inv(Ixx)
+    catch
+        throw(ArgumentError(
+            "the information matrix of the fitted model is singular; the score " *
+            "test cannot be adjusted for the effects already in the model"))
+    end
+    term = String[]; s = Float64[]; variance = Float64[]; chisq = Float64[]
+    pv = Float64[]; direction = Int[]
+    for j in 1:q
+        z = p + j
+        Izx = info[z, 1:p]
+        v = info[z, z] - dot(Izx, Ixx_inv * Izx)
+        # A candidate that the fitted effects already span has no variance left
+        stat = v > 1e-8 * max(info[z, z], floatmin()) ? score[z]^2 / v : NaN
+        push!(term, name(cands[j])); push!(s, score[z]); push!(variance, v)
+        push!(chisq, stat); push!(pv, isnan(stat) ? NaN : ccdf(Chisq(1), stat))
+        push!(direction, Int(sign(score[z])))
+    end
+    return DataFrame(term=term, score=s, variance=variance, chisq=chisq, p_value=pv,
+                     direction=direction)
+end
+
+# -----------------------------------------------------------------------------
+# Descriptive metrics of an event sequence
+# -----------------------------------------------------------------------------
+
+const _MECHANISMS = (:repetition, :reciprocation, :transitive, :cyclic, :shared_out,
+                     :shared_in)
+
+# For event s → r against the dyad clocks `ref` (first or last event time per
+# dyad): when was the mechanism's triggering configuration in place? NaN: never.
+function _trigger_time(mechanism::Symbol, ref::Dict{Tuple{Int,Int},Float64},
+                       out_nb::Dict{Int,Vector{Int}}, in_nb::Dict{Int,Vector{Int}},
+                       s::Int, r::Int, latest::Bool)
+    mechanism === :repetition && return get(ref, (s, r), NaN)
+    mechanism === :reciprocation && return get(ref, (r, s), NaN)
+    best = NaN
+    # The third actors reachable from the sender's side of the configuration
+    thirds = mechanism in (:transitive, :shared_out) ? get(out_nb, s, _NO_NEIGHBORS) :
+                                                       get(in_nb, s, _NO_NEIGHBORS)
+    for k in thirds
+        (k == s || k == r) && continue
+        a, b = mechanism === :transitive ? ((s, k), (k, r)) :
+               mechanism === :cyclic     ? ((k, s), (r, k)) :
+               mechanism === :shared_out ? ((s, k), (r, k)) :
+                                           ((k, s), (k, r))
+        ta = get(ref, a, NaN); tb = get(ref, b, NaN)
+        (isnan(ta) || isnan(tb)) && continue
+        done = max(ta, tb)               # the two-path exists once both legs do
+        best = isnan(best) ? done : latest ? max(best, done) : min(best, done)
+    end
+    return best
+end
+
+function _walk_mechanisms(f, events::AbstractVector{<:Event}, reference::Symbol,
+                          clock::Symbol)
+    reference in (:first, :last) || throw(ArgumentError(
+        "reference must be :first or :last, got :$reference"))
+    clock in (:time, :order) || throw(ArgumentError(
+        "clock must be :time or :order, got :$clock"))
+    sorted = sort(collect(events); by=e -> e.time)
+    ref = Dict{Tuple{Int,Int},Float64}()
+    out_nb = Dict{Int,Vector{Int}}(); in_nb = Dict{Int,Vector{Int}}()
+    latest = reference === :last
+    for (m, e) in enumerate(sorted)
+        t = clock === :order ? Float64(m) : _tfloat(e.time)
+        f(e, t, ref, out_nb, in_nb, latest)
+        key = (e.sender, e.receiver)
+        if !haskey(ref, key)
+            push!(get!(() -> Int[], out_nb, e.sender), e.receiver)
+            push!(get!(() -> Int[], in_nb, e.receiver), e.sender)
+            ref[key] = t
+        elseif latest
+            ref[key] = t
+        end
+    end
+    return nothing
+end
+
+"""
+    mechanism_shares(events) -> NamedTuple
+
+The share of events in a sequence that, when they happened, **closed** each of
+six configurations: `repetition` (the dyad had acted before), `reciprocation`
+(the reverse dyad had), `transitive` (an outgoing two-path `s → k → r` existed),
+`cyclic` (an incoming two-path `r → k → s`), `shared_out` (both had sent to a
+common third) and `shared_in` (both had received from one).
+
+These are descriptive counts, not effects — every share rises with the density
+of the accumulated network — but they are the natural auxiliary statistics for
+simulation-based goodness of fit: a fitted model should reproduce them
+([`gof`](@ref) uses them by default).
+
+# Example
+```julia
+using Revel
+events = [Event(1, 2, 1.0), Event(2, 1, 2.0), Event(1, 2, 3.0), Event(2, 3, 4.0),
+          Event(1, 3, 5.0)]
+shares = mechanism_shares(events)
+shares.repetition       # 0.2 — the third event repeats 1 → 2
+shares.reciprocation    # 0.4 — the second and third events answer an earlier one
+shares.transitive       # 0.2 — 1 → 3 closes 1 → 2 → 3
+```
+"""
+function mechanism_shares(events::AbstractVector{<:Event})
+    isempty(events) && throw(ArgumentError("no events"))
+    counts = zeros(Int, length(_MECHANISMS))
+    _walk_mechanisms(events, :first, :order) do e, t, ref, out_nb, in_nb, latest
+        for (k, mech) in enumerate(_MECHANISMS)
+            trigger = _trigger_time(mech, ref, out_nb, in_nb, e.sender, e.receiver, latest)
+            isnan(trigger) || (counts[k] += 1)
+        end
+    end
+    return NamedTuple{_MECHANISMS}(Tuple(counts ./ length(events)))
+end
+
+"""
+    closing_times(events; mechanism=:reciprocation, reference=:last, clock=:time)
+        -> Vector{Float64}
+
+For every event that closes `mechanism`, the time elapsed since the
+configuration it closes came into being — the "internal time" of the mechanism
+(Amati, Lomi & Snijders 2024). `mechanism` is one of `:repetition`,
+`:reciprocation`, `:transitive`, `:cyclic`, `:shared_out`, `:shared_in`.
+
+`reference=:last` measures from the most recent triggering event (how long did
+the answer take?); `reference=:first` from the earliest one, which is Amati et
+al.'s definition. For the triadic mechanisms a two-path exists from the moment
+its second leg does, and the reference is taken over the third actors.
+`clock=:order` measures the gap in events instead of clock time.
+
+The distribution of closing times is what the review recommends reporting next
+to a closure coefficient: a transitive-closure effect that operates within
+minutes and one that operates over months are different mechanisms, and the
+statistic alone does not tell them apart. It also guides the choice of a memory
+kernel before any model is fitted.
+
+# Example
+```julia
+using Revel
+events = [Event(1, 2, 1.0), Event(2, 1, 4.0), Event(1, 2, 5.0), Event(2, 1, 5.5)]
+closing_times(events)                              # [3.0, 0.5]
+closing_times(events; mechanism=:repetition)       # [4.0, 1.5]
+closing_times(events; clock=:order)                # [1.0, 1.0]
+```
+"""
+function closing_times(events::AbstractVector{<:Event}; mechanism::Symbol=:reciprocation,
+                       reference::Symbol=:last, clock::Symbol=:time)
+    mechanism in _MECHANISMS || throw(ArgumentError(
+        "mechanism must be one of $(_MECHANISMS), got :$mechanism"))
+    gaps = Float64[]
+    _walk_mechanisms(events, reference, clock) do e, t, ref, out_nb, in_nb, latest
+        trigger = _trigger_time(mechanism, ref, out_nb, in_nb, e.sender, e.receiver, latest)
+        isnan(trigger) || push!(gaps, t - trigger)
+    end
+    return gaps
+end
+
+# Gini coefficient of a non-negative vector (0 when it sums to zero)
+function _gini(x::Vector{Float64})
+    n = length(x)
+    total = sum(x)
+    (n == 0 || total <= 0) && return 0.0
+    sorted = sort(x)
+    acc = 0.0
+    for (i, v) in enumerate(sorted)
+        acc += (2i - n - 1) * v
+    end
+    return acc / (n * total)
+end
+
+function _quartiles(x::Vector{Float64})
+    isempty(x) && return (0.0, 0.0, 0.0)
+    q = quantile(x, (0.25, 0.5, 0.75))
+    return (q[1], q[2], q[3])
+end
+
+# The default auxiliary statistics of `gof`: (name, labels, events -> values)
+function _default_auxiliary(n_actors::Int)
+    shares = ("mechanism shares", [String(m) for m in _MECHANISMS],
+              ev -> collect(Float64, values(mechanism_shares(ev))))
+    concentration = ("degree concentration",
+        ["gini(outdegree)", "gini(indegree)", "distinct dyads / events"],
+        function (ev)
+            out = zeros(n_actors); inn = zeros(n_actors)
+            dyads = Set{Tuple{Int,Int}}()
+            for e in ev
+                1 <= e.sender <= n_actors && (out[e.sender] += 1)
+                1 <= e.receiver <= n_actors && (inn[e.receiver] += 1)
+                push!(dyads, (e.sender, e.receiver))
+            end
+            return [_gini(out), _gini(inn), length(dyads) / length(ev)]
+        end)
+    timing = ("closing times (events)",
+        ["reciprocation q25", "reciprocation q50", "reciprocation q75",
+         "repetition q25", "repetition q50", "repetition q75"],
+        function (ev)
+            a = _quartiles(closing_times(ev; mechanism=:reciprocation, clock=:order))
+            b = _quartiles(closing_times(ev; mechanism=:repetition, clock=:order))
+            return [a..., b...]
+        end)
+    return [shares, concentration, timing]
+end
+
+"""
+    gof(fit::RevelFit; n_sim=100, rng=Random.default_rng(), auxiliary=nothing)
+        -> Networks.GOFResult
+
+Simulation-based goodness of fit (Amati, Lomi & Snijders 2024): simulate `n_sim`
+event sequences from the fitted model and compare auxiliary statistics of the
+observed sequence with their simulated distribution. The result is the
+ecosystem's shared `Networks.GOFResult` — observed value, simulation envelope
+and Monte-Carlo p-value per statistic — so it prints like every other model's
+`gof`.
+
+An ordinal fit is simulated **conditional on the observed event times** (and
+event types and weights), so a memory kernel stated in clock units keeps its
+meaning; an interval-timing fit simulates its own waiting times from the fitted
+baseline. A receiver-choice fit (`riskset=:sender`) is simulated conditional on
+the observed senders.
+
+The default auxiliary statistics are statistics the model was *not* fitted to
+match in general: the share of events closing each of six configurations
+([`mechanism_shares`](@ref)), the concentration of activity and popularity (Gini
+coefficients, distinct dyads per event), and the quartiles of the closing times
+of reciprocation and repetition measured in events ([`closing_times`](@ref)).
+Supply your own as `auxiliary = [(name, labels, events -> values), …]`.
+
+Not available for a fit on a subset of cases (the model does not describe the
+other events) or on a time-varying risk set.
+
+# Example
+```julia
+using Revel, Random
+stats = [Inertia(transform=:log1p), Reciprocation(transform=:log1p)]
+events = simulate_events(stats, [1.0, 0.5], 6, 150; rng=Xoshiro(1))
+result = gof(fit_revel(events, stats, 6); n_sim=20, rng=Xoshiro(2))
+n_simulations(result)                      # 20
+[s.name for s in result.statistics]        # the three auxiliary families
+```
+"""
+function gof(fit::RevelFit; n_sim::Int=100, rng::AbstractRNG=Random.default_rng(),
+             auxiliary=nothing)
+    n_sim >= 1 || throw(ArgumentError("n_sim must be at least 1"))
+    fit.cases === nothing || throw(ArgumentError(
+        "gof simulates whole sequences from the fitted model, but this fit " *
+        "describes only a subset of the events (`cases`). Assess it with " *
+        "event_diagnostics / prediction_summary instead."))
+    fit.riskset isa Function && throw(ArgumentError(
+        "gof cannot simulate from a time-varying risk set"))
+    aux = auxiliary === nothing ? _default_auxiliary(fit.n_actors) : auxiliary
+    E = length(fit.events)
+    θ = collect(Float64, _effect_coef(fit))
+
+    riskset = fit.riskset === :active ?
+        unique!([_norm_dyad(e.sender, e.receiver, fit.directed) for e in fit.events]) :
+        fit.riskset
+    common = (rng=rng, directed=fit.directed, riskset=riskset,
+              eventtype=[e.eventtype for e in fit.events],
+              weights=[e.weight for e in fit.events],
+              senders=riskset === :sender ? [e.sender for e in fit.events] : nothing)
+    simulate = if fit.model === :timing
+        λ0 = exp(coef(fit)[1])
+        () -> simulate_events(fit.statistics, θ, fit.n_actors, E; baseline=λ0, common...)
+    else
+        times = [_tfloat(e.time) for e in fit.events]
+        () -> simulate_events(fit.statistics, θ, fit.n_actors, E; times=times, common...)
+    end
+
+    observed = [collect(Float64, f(fit.events)) for (_, _, f) in aux]
+    sims = [Matrix{Float64}(undef, n_sim, length(o)) for o in observed]
+    for b in 1:n_sim
+        ev = simulate()
+        for (a, (_, _, f)) in enumerate(aux)
+            sims[a][b, :] .= f(ev)
+        end
+    end
+    stats = [GOFStatistic(aux[a][1], aux[a][2], observed[a], sims[a])
+             for a in eachindex(aux)]
+    label = fit.model === :timing ? "relational event model (interval timing)" :
+                                    "relational event model (ordinal)"
+    return GOFResult(stats; model=label)
+end
+
+# -----------------------------------------------------------------------------
+# Collinearity among statistics
+# -----------------------------------------------------------------------------
+
+"""
+    statistic_collinearity(events, statistics, n_actors; kwargs...) -> NamedTuple
+
+How collinear the statistics of a specification are, **as the likelihood sees
+them** — centred within each event's risk set, since only differences between
+the dyads of one risk set carry information:
+
+- `names`;
+- `correlation` — the within-risk-set correlation matrix;
+- `vif` — variance inflation factors (the diagonal of the inverse correlation
+  matrix; `Inf` for an exactly collinear statistic);
+- `condition_number` — of the correlation matrix.
+
+Endogenous statistics are built from the same history and overlap by
+construction (inertia and out-degree, the four triadic statistics, an
+interaction and its main effects), yet none of the reviews the package is based
+on offers a diagnostic for it. A VIF above about 10, or a condition number in
+the hundreds, says a coefficient is being estimated from little independent
+variation and will move when neighbouring terms enter or leave. A statistic that
+is constant within every risk set — a [`GlobalEffect`](@ref), a sender covariate
+in a receiver-choice model — has no variation at all and is reported with
+`NaN` correlations and an infinite VIF.
+
+Keywords are those of [`each_risk_set`](@ref).
+
+# Example
+```julia
+using Revel, Random
+events = simulate_events([Inertia(transform=:log1p)], [1.0], 6, 200; rng=Xoshiro(1))
+check = statistic_collinearity(events, [Inertia(), OutdegreeSender(), OTP()], 6)
+check.names                        # ["inertia", "outdegreeSender", "otp"]
+size(check.correlation)            # (3, 3)
+all(check.vif .>= 1)               # true
+```
+"""
+function statistic_collinearity(events::Vector{<:Event}, statistics, n_actors::Int;
+                                kwargs...)
+    names = _stat_names(statistics)
+    p = length(names)
+    S = zeros(p, p)
+    mean_ = zeros(p)
+    each_risk_set(events, statistics, n_actors; kwargs...) do v
+        D = length(v.dyads)
+        fill!(mean_, 0.0)
+        @inbounds for k in 1:p, d in 1:D
+            mean_[k] += v.X[d, k]
+        end
+        mean_ ./= D
+        @inbounds for l in 1:p, k in 1:l
+            acc = 0.0
+            for d in 1:D
+                acc += (v.X[d, k] - mean_[k]) * (v.X[d, l] - mean_[l])
+            end
+            S[k, l] += acc
+        end
+    end
+    for l in 1:p, k in 1:(l - 1)
+        S[l, k] = S[k, l]
+    end
+    sd = sqrt.(diag(S))
+    R = [sd[k] > 0 && sd[l] > 0 ? S[k, l] / (sd[k] * sd[l]) : (k == l ? 1.0 : NaN)
+         for k in 1:p, l in 1:p]
+    varying = findall(>(0), sd)
+    vif = fill(Inf, p)
+    cond_number = Inf
+    if !isempty(varying)
+        Rv = Symmetric(R[varying, varying])
+        vals = eigvals(Rv)
+        if minimum(vals) > sqrt(eps()) * maximum(vals)
+            vif[varying] .= diag(inv(Rv))
+            length(varying) == p && (cond_number = maximum(vals) / minimum(vals))
+        end
+    end
+    return (names=names, correlation=R, vif=vif, condition_number=cond_number)
+end
