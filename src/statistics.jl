@@ -41,7 +41,10 @@ compute(stat::AbstractRevelStatistic, history::InteractionHistory, sender::Int,
     compute(stat::AbstractRevelStatistic, state::REM.EventNetworkState, sender, receiver)
 
 The value of a Revel statistic for the candidate event `sender → receiver`, read
-off the events that happened before it. These are methods of the ecosystem's
+off the events of the history that happened at or before `time` — later events
+in the history are ignored, so a whole sequence can be passed and evaluated at
+any point of it. The history must be in time order (an `ArgumentError` says so
+otherwise) and event times must be finite. These are methods of the ecosystem's
 shared `compute` generic (Networks.jl), in the two signatures its relational
 event packages use: Relevent.jl's, on an `InteractionHistory` at an explicit
 `time`, and REM.jl's, on an `EventNetworkState` at its `current_time`. The two

@@ -108,21 +108,22 @@ function _value(stat::DyadEffect, events, s::Int, r::Int, t::Float64)
     return Float64(stat.transform(v))
 end
 
-_interval_constant(stat::DyadEffect) = _memory_interval_constant(stat.layer.memory)
+_interval_constant(stat::DyadEffect) = _layer_interval_constant(stat.layer)
 
 """
     Inertia(; scaling=:none, empty=0.0, transform=identity, name=nothing,
             layer=nothing, memory=FullMemory(), types=nothing, weighted=false,
             keep=nothing, clock=:time, symmetric=false)
 
-Repetition: the weight of past `s → r` events (Butts 2008 "persistence";
-Brandes, Lerner & Snijders 2009 "inertia"; remstats `inertia()`; rem
-`inertiaStat`; goldfish `inertia(weighted=TRUE)`; eventnet "repetition").
+Repetition: the weight of past `s → r` events (Brandes, Lerner & Snijders 2009
+"inertia"; remstats `inertia()`; rem `inertiaStat`; goldfish
+`inertia(weighted=TRUE)`; eventnet "repetition").
 
-`scaling=:prop` is Butts's persistence — the share of the sender's past sends
-that went to this receiver (relevent `FrPSndSnd`, remstats
-`inertia(scaling="prop")`, the "embedding inertia" of Kitts et al. 2017); pass
-`empty=1/(n-1)` to reproduce those packages' value for a sender with no history.
+`scaling=:prop` is Butts's (2008) "persistence" — the share of the sender's past
+sends that went to this receiver (remstats `inertia(scaling="prop")`, the
+"embedding inertia" of Kitts et al. 2017, and relevent's documented `FrPSndSnd`,
+whose output in relevent 1.2.1 differs from its documentation); pass
+`empty=1/(n-1)` for the value those packages give a sender with no history.
 `transform=:indicator` gives goldfish's default 0/1 form.
 
 # Example
@@ -211,6 +212,11 @@ end
 @inline function _actor_degree(L::EventLayer, st::_LayerState, a::Int, kind::Symbol,
                                measure::Symbol)
     one_sided = L.symmetric && kind === :total
+    if measure === :intensity
+        # events per distinct partner (0 with no partner)
+        m = _actor_degree(L, st, a, kind, :partners)
+        return m > 0 ? _actor_degree(L, st, a, kind, :events) / m : 0.0
+    end
     if measure === :events
         return (kind === :out || one_sided) ? _outdeg(L, st, a) :
                kind === :in ? _indeg(L, st, a) :
@@ -229,14 +235,15 @@ end
 function _check_degree_args(kind::Symbol, measure::Symbol, scaling::Symbol)
     kind in (:out, :in, :total) || throw(ArgumentError(
         "kind must be :out, :in or :total, got :$kind"))
-    measure in (:events, :partners) || throw(ArgumentError(
-        "measure must be :events (event volume, the \"intensity\" of Vu et al. " *
-        "2017) or :partners (distinct partners, their \"degree\"), got :$measure"))
+    measure in (:events, :partners, :intensity) || throw(ArgumentError(
+        "measure must be :events (event volume), :partners (distinct partners, the " *
+        "\"degree\" of Vu et al. 2017) or :intensity (events per partner, their " *
+        "\"intensity\"), got :$measure"))
     scaling in (:none, :prop) || throw(ArgumentError(
         "scaling must be :none or :prop, got :$scaling"))
-    scaling === :prop && measure === :partners && throw(ArgumentError(
+    scaling === :prop && measure !== :events && throw(ArgumentError(
         "scaling=:prop divides event volume by the number of past events; it is " *
-        "not defined for measure=:partners"))
+        "not defined for measure=:$measure"))
     return nothing
 end
 
@@ -253,9 +260,11 @@ forms are [`OutdegreeSender`](@ref), [`IndegreeSender`](@ref),
 On a `symmetric=true` layer (undirected events) the three kinds coincide: each is
 the number of events the actor took part in.
 
-`measure=:partners` counts distinct partners instead of events — the
-degree/intensity distinction of the Lomi–Vu line (Vu, Lomi, Mascia & Pallotti
-2017). `scaling=:prop` divides event volume by the number of past events (twice
+`measure=:partners` counts distinct partners instead of events, and
+`measure=:intensity` divides the events by the partners — the "degree" and the
+"intensity" (events per collaboration tie) of Vu, Lomi, Mascia & Pallotti
+(2017, appendix eq. 2); `measure=:events` (default) is plain event volume.
+`scaling=:prop` divides event volume by the number of past events (twice
 that for `:total`), the normalised degree of relevent's `NIDSnd` family and
 remstats' `scaling="prop"`; `empty` is returned before any event.
 
@@ -265,6 +274,7 @@ using Revel
 h = build_history([Event(1, 2, 1.0), Event(1, 3, 2.0), Event(1, 2, 3.0)])
 compute(DegreeEffect(EventLayer()), h, 1, 2, 4.0)                        # 3.0
 compute(DegreeEffect(EventLayer(); measure=:partners), h, 1, 2, 4.0)     # 2.0
+compute(DegreeEffect(EventLayer(); measure=:intensity), h, 1, 2, 4.0)    # 1.5
 compute(DegreeEffect(EventLayer(); scaling=:prop), h, 1, 2, 4.0)         # 1.0
 ```
 """
@@ -288,7 +298,7 @@ function DegreeEffect(layer::EventLayer; role::Symbol=:sender, kind::Symbol=:out
     f = _transform_fn(transform)
     base = (kind === :total ? "totaldegree" : string(kind) * "degree") *
            (role === :sender ? "Sender" : "Receiver") *
-           (measure === :partners ? ".partners" : "") *
+           (measure === :events ? "" : ".$(measure)") *
            (scaling === :prop ? ".prop" : "")
     return DegreeEffect{typeof(layer), typeof(f)}(
         layer, role, kind, measure, scaling, Float64(empty), f,
@@ -306,7 +316,7 @@ function _value(stat::DegreeEffect, events, s::Int, r::Int, t::Float64)
     return Float64(stat.transform(v))
 end
 
-_interval_constant(stat::DegreeEffect) = _memory_interval_constant(stat.layer.memory)
+_interval_constant(stat::DegreeEffect) = _layer_interval_constant(stat.layer)
 
 function _degree_constructor(what::String, role::Symbol, kind::Symbol; layer, kwargs...)
     layer_kw, rest = _split_layer_kwargs(kwargs)
@@ -466,7 +476,7 @@ function DyadDegreeEffect(layer::EventLayer; sender_kind::Symbol=:total,
         "combine must be one of $(_DEGREE_COMBINE), got :$combine"))
     f = _transform_fn(transform)
     b = something(base, "degree_$(combine)($(sender_kind),$(receiver_kind))") *
-        (measure === :partners ? ".partners" : "") * (scaling === :prop ? ".prop" : "")
+        (measure === :events ? "" : ".$(measure)") * (scaling === :prop ? ".prop" : "")
     return DyadDegreeEffect{typeof(layer), typeof(f)}(
         layer, sender_kind, receiver_kind, combine, measure, scaling, Float64(empty), f,
         _label(name, _auto_name(b, _suffix(layer), f)))
@@ -488,7 +498,7 @@ function _value(stat::DyadDegreeEffect, events, s::Int, r::Int, t::Float64)
     return Float64(stat.transform(v))
 end
 
-_interval_constant(stat::DyadDegreeEffect) = _memory_interval_constant(stat.layer.memory)
+_interval_constant(stat::DyadDegreeEffect) = _layer_interval_constant(stat.layer)
 
 function _dyad_degree_constructor(base::String, combine::Symbol; layer, sender_kind=:total,
                                   receiver_kind=:total, kwargs...)
@@ -570,17 +580,22 @@ DegreeDiff(; layer=nothing, kwargs...) =
                         name=nothing, layer=nothing, …)
 
 The product of the sender's and the receiver's degrees — by default sender
-out-degree × receiver in-degree, the "assortativity" of Vu, Lomi, Mascia &
-Pallotti (2017) and the activity × popularity term of Lerner & Lomi (2020). A
-negative coefficient is read as disassortative (core–periphery) mixing. It is an
-endogenous × endogenous interaction, and the literature's hierarchy principle
-asks for both main effects alongside it.
+out-degree × receiver in-degree in events, the activity × popularity term of
+Lerner & Lomi (2020) (who take `log1p` of each degree first: build it from
+`DyadDegreeEffect` on transformed parts, or use an [`Interaction`](@ref) of
+two transformed degrees). `measure=:partners` gives the "assortativity by
+degree" of Vu, Lomi, Mascia & Pallotti (2017, eq. 9), the product of the
+distinct partners. A negative coefficient is read as disassortative
+(core–periphery) mixing. It is an endogenous × endogenous interaction, and the
+literature's hierarchy principle asks for both main effects alongside it.
 
 # Example
 ```julia
 using Revel
 h = build_history([Event(1, 2, 1.0), Event(1, 3, 2.0), Event(2, 3, 3.0)])
 compute(DegreeAssortativity(), h, 1, 3, 4.0)    # 2 × 2 = 4.0
+h2 = build_history([Event(1, 2, 1.0), Event(1, 2, 2.0), Event(2, 3, 3.0)])
+compute(DegreeAssortativity(measure=:partners), h2, 1, 3, 4.0)   # 1 × 1 = 1.0
 ```
 """
 DegreeAssortativity(; layer=nothing, sender_kind::Symbol=:out,
@@ -593,7 +608,7 @@ DegreeAssortativity(; layer=nothing, sender_kind::Symbol=:out,
 # The two-path
 # -----------------------------------------------------------------------------
 
-const _TWOPATH_COMBINE = (:min, :product, :sum, :max, :count)
+const _TWOPATH_COMBINE = (:min, :product, :harmonic, :sum, :max, :count)
 
 """
     TwoPathEffect(leg1, leg2=leg1; dir1=:out, dir2=:in, combine=:min, root=false,
@@ -608,17 +623,23 @@ legs linking the candidate's sender and receiver through `k`.
   `w₂(r, k)`, `:sym` their sum. A *different* layer per leg gives cross-network
   and signed closure (goldfish `mixedTrans`; the balance statistics of Brandes,
   Lerner & Snijders 2009; rem `triadStat(eventtypevalues=…)`).
-- `combine` — how the two legs of one path are combined. The packages disagree,
-  which is why "the same" triadic effect differs in value across them: `:min`
-  (Butts 2008; relevent; remstats; eventnet's default), `:product` (rem;
-  Vu et al. 2011; Perry & Wolfe 2013), `:sum`, `:max`, or `:count` — the number
-  of distinct third actors (goldfish; remstats `unique=TRUE`).
+- `combine` — how the two legs of one path are combined. The packages and
+  papers disagree, which is why "the same" triadic effect differs in value
+  across them: `:min` (Butts 2008; relevent; remstats; the default of eventnet's
+  dyadic triangle statistics, as its documentation states — not verified by
+  running it), `:product` (rem; Vu et al. 2011; Perry & Wolfe 2013),
+  `:harmonic` — `2ab/(a + b)`, the harmonic mean of Vu, Lomi, Mascia & Pallotti
+  (2017, eq. 12) — `:sum`, `:max`, or `:count`, the number of distinct third
+  actors (goldfish; remstats `unique=TRUE`).
 - `root` — take the square root of the total (rem's `triadStat`; the balance
   statistics).
 - `order` — `:leg1_first` or `:leg2_first` keep a third actor only if some event
-  on the named leg precedes some event on the other; `:none` ignores timing. (A
-  cheaper device than the pairwise time-ordered transitivity of Arena, Mulder &
-  Leenders 2022, which it approximates.)
+  on the named leg precedes some event on the other (the dyads' first and last
+  events over the whole history, whatever the memory); `:none` ignores timing.
+  This is a cheaper device than the time-ordered transitivity of Arena, Mulder &
+  Leenders (2024, eq. 12), which counts the time-ordered *pairs* of events on
+  the two legs within a lag window, and it agrees with that statistic only when
+  each leg holds a single event.
 - `third` — a weight `(s, k, r) -> Real` on the third actor: the hook for
   closure among actors sharing an attribute (see [`matching_third`](@ref)) and
   for eventnet's node-attribute-on-the-broker closure.
@@ -633,6 +654,7 @@ h = build_history([Event(1, 3, 1.0), Event(1, 3, 2.0), Event(3, 2, 3.0)])
 L = EventLayer()
 compute(TwoPathEffect(L), h, 1, 2, 4.0)                       # min(2, 1) = 1.0
 compute(TwoPathEffect(L; combine=:product), h, 1, 2, 4.0)     # 2.0
+compute(TwoPathEffect(L; combine=:harmonic), h, 1, 2, 4.0)    # 2·2·1/(2 + 1) ≈ 1.33
 compute(TwoPathEffect(L; combine=:count), h, 1, 2, 4.0)       # 1.0
 ```
 """
@@ -694,7 +716,8 @@ end
         ok || return 0.0
     end
     c = stat.combine
-    v = c === :min ? min(a, b) : c === :product ? a * b : c === :sum ? a + b :
+    v = c === :min ? min(a, b) : c === :product ? a * b :
+        c === :harmonic ? 2a * b / (a + b) : c === :sum ? a + b :
         c === :max ? max(a, b) : 1.0
     stat.third === nothing || (v *= Float64(stat.third(s, k, r)))
     return v
@@ -720,8 +743,8 @@ function _value(stat::TwoPathEffect, events, s::Int, r::Int, t::Float64)
 end
 
 _interval_constant(stat::TwoPathEffect) =
-    _memory_interval_constant(stat.leg1.memory) &&
-    _memory_interval_constant(stat.leg2.memory)
+    _layer_interval_constant(stat.leg1) &&
+    _layer_interval_constant(stat.leg2)
 
 function _twopath_constructor(base::String, dir1::Symbol, dir2::Symbol, order_when_true::Symbol;
                               layer, ordered::Bool=false, order::Symbol=:none, kwargs...)
@@ -784,10 +807,14 @@ ITP(; layer=nothing, kwargs...) =
         transform=identity, name=nothing, layer=nothing, memory=…, …)
 
 Outbound shared partners `s → k ← r`: third actors both have sent to (Butts
-2008; relevent `OSPSnd`; remstats `osp()`; goldfish `commonReceiver`; amorem
-"sending balance"; Perry & Wolfe's "cosibling"). Beware that package names
-invert here — goldfish's `commonReceiver` is this statistic, not [`ISP`](@ref).
-See [`TwoPathEffect`](@ref).
+2008; relevent `OSPSnd`, whose output in relevent 1.2.1 differs from this
+definition — see the concordance; remstats `osp()`; goldfish `commonReceiver`;
+Perry & Wolfe's "cosibling"). amorem's "sending balance" is the same
+configuration, but whether it combines the legs by the minimum has not been
+checked. Mind the vocabulary: the partner is *shared as a receiver* — "common
+receiver" — while the sender and the receiver of the candidate both *send*; a
+package that names the effect after the candidate's side calls it the opposite
+of one that names it after the partner. See [`TwoPathEffect`](@ref).
 
 # Example
 ```julia
@@ -858,8 +885,11 @@ signed events: the two-path through a third actor `k` whose first leg (`s`–`k`
 and second leg (`k`–`r`) are read off the **undirected** positive or negative
 event weights, the legs multiplied, the paths summed and the square root taken.
 
-`kind` is `:friend_of_friend` (+,+), `:friend_of_enemy` (+,−: `k` is `s`'s
-friend and `r`'s enemy), `:enemy_of_friend` (−,+) or `:enemy_of_enemy` (−,−).
+`kind` names what the receiver `r` is to the sender `s`, through `k`, with the
+signs of the (`s`–`k`, `k`–`r`) legs as in Brandes et al.'s definitions:
+`:friend_of_friend` (+,+), `:friend_of_enemy` (−,+: `k` is `s`'s enemy and
+`r`'s friend — friendOfEnemy(a, b) = √Σᵢ ω⁻(a,i)·ω⁺(i,b)), `:enemy_of_friend`
+(+,−: `k` is `s`'s friend and `r`'s enemy) or `:enemy_of_enemy` (−,−).
 `positive`/`negative` name the event types carrying each sign. Balance theory
 predicts positive events towards friends of friends and enemies of enemies, and
 negative events towards the other two. The same construction is rem's
@@ -870,8 +900,10 @@ negative events towards the other two. The same construction is rem's
 using Revel
 h = build_history([Event(1, 3, 1.0; eventtype=:positive),
                    Event(3, 2, 2.0; eventtype=:negative)])
-compute(BalanceEffect(:friend_of_enemy), h, 1, 2, 3.0)     # 1.0
-compute(BalanceEffect(:friend_of_friend), h, 1, 2, 3.0)    # 0.0
+# 3 is 1's friend and 2's enemy: 2 is an enemy of 1's friend
+compute(BalanceEffect(:enemy_of_friend), h, 1, 2, 3.0)     # 1.0
+compute(BalanceEffect(:friend_of_enemy), h, 1, 2, 3.0)     # 0.0
+compute(BalanceEffect(:friend_of_enemy), h, 2, 1, 3.0)     # 1.0 — 1 is a friend of 2's enemy
 ```
 """
 function BalanceEffect(kind::Symbol; positive=:positive, negative=:negative,
@@ -884,8 +916,10 @@ function BalanceEffect(kind::Symbol; positive=:positive, negative=:negative,
                      symmetric=true)
     neg = EventLayer(memory=memory, types=negative, weighted=weighted, clock=clock,
                      symmetric=true)
-    leg1 = kind in (:friend_of_friend, :friend_of_enemy) ? pos : neg
-    leg2 = kind in (:friend_of_friend, :enemy_of_friend) ? pos : neg
+    # The sender's leg is positive when `k` is the sender's friend, the
+    # receiver's leg when `k` is the receiver's friend
+    leg1 = kind in (:friend_of_friend, :enemy_of_friend) ? pos : neg
+    leg2 = kind in (:friend_of_friend, :friend_of_enemy) ? pos : neg
     auto = string(kind) * _suffix(EventLayer(memory=memory, weighted=weighted, clock=clock))
     # Both layers are symmetric, so `:out` on each leg reads the undirected weight
     return TwoPathEffect(leg1, leg2; dir1=:out, dir2=:out, combine=:product, root=root,
@@ -991,7 +1025,7 @@ function _value(stat::FourCycleEffect, events, s::Int, r::Int, t::Float64)
     return Float64(stat.transform(total))
 end
 
-_interval_constant(stat::FourCycleEffect) = _memory_interval_constant(stat.layer.memory)
+_interval_constant(stat::FourCycleEffect) = _layer_interval_constant(stat.layer)
 
 # -----------------------------------------------------------------------------
 # Order-based devices: recency ranks, time since the last event
@@ -1007,8 +1041,9 @@ sender (`1` for the latest, `1/2` for the one before, `0` if never) — relevent
 actors the sender most recently **sent to** — relevent `RSndSnd`, remstats
 `rrankSend()`, first printed by DuBois, Butts, McFarland & Smyth (2013).
 
-Ranks depend on event order only, so the layer's memory kernel is ignored;
-`types`/`keep` still select which events are ranked.
+Ranks depend on event order only, so the statistic takes no memory kernel (a
+`memory=` keyword, or a shared `layer=` with one, is refused); `types`/`keep`
+select which events are ranked.
 
 # Example
 ```julia
@@ -1031,6 +1066,7 @@ function RecencyRank(mode::Symbol=:receive; layer=nothing, name=nothing, kwargs.
     layer_kw, rest = _split_layer_kwargs(kwargs)
     _no_extra_kwargs(rest, "RecencyRank")
     L = _resolve_layer(layer; layer_kw...)
+    _no_memory(L, "RecencyRank", "a rank depends on the order of events only")
     auto = (mode === :send ? "rrankSend" : "rrankReceive") * _suffix(L)
     return RecencyRank{typeof(L)}(L, mode, _label(name, auto))
 end
@@ -1056,6 +1092,14 @@ function _value(stat::RecencyRank, events, s::Int, r::Int, t::Float64)
 end
 
 _interval_constant(::RecencyRank) = true
+
+# Statistics that read the order or the timing of the last event, not weights
+function _no_memory(L::EventLayer, what::AbstractString, why::AbstractString)
+    L.memory isa FullMemory || throw(ArgumentError(
+        "$what takes no memory kernel: $why, so a $(_memory_label(L.memory)) " *
+        "memory would be ignored. Leave `memory` out (and pass a `layer=` without one)."))
+    return nothing
+end
 
 """
     inverse_gap(Δ) -> Float64
@@ -1092,13 +1136,15 @@ A function of the time elapsed since the most recent event of a given kind:
 
 "Recency" names at least four different statistics in the literature, and
 `transform` selects among them: [`inverse_gap`](@ref) `1/(Δ+1)` (remstats, the
-default), `Δ -> exp(-b*Δ)` (Boschi & Wit; `Relevent.LocalInertia`),
-`Δ -> 1 - exp(-Δ)` (Boschi & Wit 2026) or `identity` for the raw gap time
-(Zappa & Vu 2021). `empty` is returned when no such event has happened. With
-`clock=:order` the gap is measured in events.
+default), `Δ -> exp(-b*Δ)` (`Relevent.LocalInertia`), `Δ -> 1 - exp(-Δ)` (Boschi
+& Wit 2026, who code "never happened" as 1 — pass `empty=1.0` with it, since
+the default `empty=0.0` would equal "just happened") or `identity` for the raw
+gap time (Zappa & Vu 2021). `empty` is returned when no such event has
+happened. With `clock=:order` the gap is measured in events. The statistic
+reads the time of the last event, not a weight, so it takes no memory kernel.
 
-The statistic changes continuously between events, so it is not admissible in
-the exact-time likelihood.
+On the time clock the statistic changes continuously between events, so it is
+not admissible in the exact-time likelihood; with `clock=:order` it is.
 
 # Example
 ```julia
@@ -1130,6 +1176,7 @@ function TimeSince(target::Symbol=:dyad; layer=nothing, transform=inverse_gap,
     layer_kw, rest = _split_layer_kwargs(kwargs)
     _no_extra_kwargs(rest, "TimeSince")
     L = _resolve_layer(layer; layer_kw...)
+    _no_memory(L, "TimeSince", "it reads the time since the last event")
     f = transform isa Symbol ? _transform_fn(transform) : transform
     tl = f === inverse_gap ? "" : f === identity ? ".gap" : "." * string(nameof(f))
     auto = _TIMESINCE_NAMES[target] * tl * _suffix(L)
@@ -1151,6 +1198,9 @@ function _value(stat::TimeSince, events, s::Int, r::Int, t::Float64)
     isnan(last) && return stat.empty
     return Float64(stat.transform(st.now - last))
 end
+
+# On the event clock the gap changes only when an event happens
+_interval_constant(stat::TimeSince) = stat.layer.clock === :order
 
 # -----------------------------------------------------------------------------
 # Participation shifts beyond Relevent's thirteen
@@ -1178,9 +1228,10 @@ struct PShiftABAB <: AbstractRevelStatistic
 end
 PShiftABAB(; name::AbstractString="PSAB-AB") = PShiftABAB(String(name))
 
-function _value(::PShiftABAB, events, s::Int, r::Int, ::Float64)
-    isempty(events) && return 0.0
-    a, b, _ = _sig(events[end])
+function _value(::PShiftABAB, events, s::Int, r::Int, t::Float64)
+    k = _n_before(events, t)
+    k == 0 && return 0.0
+    a, b, _ = _sig(events[k])
     return (s == a && r == b) ? 1.0 : 0.0
 end
 
@@ -1221,9 +1272,10 @@ function UndirectedPShift(kind::Symbol; name=nothing)
                                                 ".undirected"))
 end
 
-function _value(stat::UndirectedPShift, events, s::Int, r::Int, ::Float64)
-    isempty(events) && return 0.0
-    a, b, _ = _sig(events[end])
+function _value(stat::UndirectedPShift, events, s::Int, r::Int, t::Float64)
+    k = _n_before(events, t)
+    k == 0 && return 0.0
+    a, b, _ = _sig(events[k])
     shared = (s == a || s == b) + (r == a || r == b)
     return stat.kind === :AB_AB ? Float64(shared == 2) : Float64(shared == 1)
 end
@@ -1288,7 +1340,7 @@ function _value(stat::NodeTransitivity, events, s::Int, r::Int, t::Float64)
     return Float64(stat.transform(total))
 end
 
-_interval_constant(stat::NodeTransitivity) = _memory_interval_constant(stat.layer.memory)
+_interval_constant(stat::NodeTransitivity) = _layer_interval_constant(stat.layer)
 
 """
     StructuralSimilarity(; measure=:jaccard, direction=:out, transform=identity,
@@ -1369,4 +1421,4 @@ function _value(stat::StructuralSimilarity, events, s::Int, r::Int, t::Float64)
 end
 
 _interval_constant(stat::StructuralSimilarity) =
-    _memory_interval_constant(stat.layer.memory)
+    _layer_interval_constant(stat.layer)

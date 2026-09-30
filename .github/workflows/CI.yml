@@ -9,6 +9,12 @@ on:
   pull_request:
     branches:
       - main
+  # The siblings are cloned at their current `main`: a nightly run catches a
+  # change in Networks.jl, REM.jl or Relevent.jl that breaks this package even
+  # when nothing here moved.
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -22,6 +28,8 @@ jobs:
   test:
     name: Julia ${{ matrix.version }} - ${{ matrix.os }} - ${{ matrix.arch }}
     runs-on: ${{ matrix.os }}
+    # An upstream regression in Julia nightly is reported, not a red badge
+    continue-on-error: ${{ matrix.version == 'nightly' }}
     strategy:
       fail-fast: false
       matrix:
@@ -32,13 +40,19 @@ jobs:
           - 'nightly'
         os:
           - ubuntu-latest
-          - macos-latest
           - windows-latest
         arch:
           - x64
-        exclude:
-          - version: 'nightly'
+        include:
+          # Apple silicon runs natively (macos-latest is arm64; x64 would run
+          # under Rosetta)
+          - version: '1.12'
             os: macos-latest
+            arch: aarch64
+          - version: '1'
+            os: macos-latest
+            arch: aarch64
+        exclude:
           - version: 'nightly'
             os: windows-latest
     steps:
@@ -47,7 +61,7 @@ jobs:
       # A lone checkout has no siblings, so those paths dangle and Pkg fails to
       # resolve before a single test runs. Rebuild the layout every developer has
       # locally: this package in a directory named after it, siblings beside it.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           path: Revel.jl
 
@@ -68,17 +82,21 @@ jobs:
 
       - uses: julia-actions/cache@v2
 
+      # Coverage instrumentation slows the suite; only the cell that uploads it
+      # pays for it
       - name: Run tests
         shell: bash
         working-directory: Revel.jl
-        run: julia --project=. -e 'using Pkg; Pkg.test(coverage=true)'
+        env:
+          COVERAGE: ${{ matrix.version == '1' && matrix.os == 'ubuntu-latest' }}
+        run: julia --project=. -e 'using Pkg; Pkg.test(coverage=ENV["COVERAGE"] == "true")'
 
       - uses: julia-actions/julia-processcoverage@v1
         if: matrix.version == '1' && matrix.os == 'ubuntu-latest'
         with:
           directories: Revel.jl/src
 
-      - uses: codecov/codecov-action@v4
+      - uses: codecov/codecov-action@v5
         if: matrix.version == '1' && matrix.os == 'ubuntu-latest'
         with:
           files: lcov.info

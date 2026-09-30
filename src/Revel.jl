@@ -6,13 +6,13 @@ effect × covariate interactions and the goodness-of-fit diagnostics mapped by a
 review of the relational event model literature (2008–2026), organised the way
 that review found the literature to be organised:
 
-- **five structural configurations** — the dyad, the reversed dyad, node degree,
-  the two-path and the three-path — as parametric statistics (`DyadEffect`,
-  `DegreeEffect`, `DyadDegreeEffect`, `TwoPathEffect`, `FourCycleEffect`), with
-  the literature's names as constructors (`Inertia`, `Reciprocation`, `OTP`,
-  `ITP`, `OSP`, `ISP`, …);
+- **four structural configurations** — the dyad (in either direction), node
+  degree, the two-path and the three-path — as five parametric statistics
+  (`DyadEffect`, `DegreeEffect` and `DyadDegreeEffect` for one degree or two
+  combined, `TwoPathEffect`, `FourCycleEffect`), with the literature's names as
+  constructors (`Inertia`, `Reciprocation`, `OTP`, `ITP`, `OSP`, `ISP`, …);
 - **measurement choices that are orthogonal to the configuration** — the memory
-  kernel (`FullMemory`, `HalfLife`, `Window`, `Interval`, `PowerLaw`,
+  kernel (`FullMemory`, `HalfLife`, `Window`, `IntervalMemory`, `PowerLaw`,
   `LinearDecay`), event-type and attribute filters, event weights, scaling and
   the zero-history value — carried by an `EventLayer`;
 - **exogenous effects** on static or time-varying actor covariates, dyadic
@@ -25,8 +25,8 @@ that review found the literature to be organised:
   distributions and a collinearity diagnostic.
 
 Every statistic implements both compute interfaces of the ecosystem, so it works
-in `Relevent.fit_obpm`/`fit_timing` (full risk set), in `REM.fit_rem`
-(case-control sampling) and in Revel's own `fit_revel`.
+in `Relevent.fit_obpm`/`fit_timing` (full risk set), in `REM.fit_rem` and in
+Revel's own `fit_revel` (full, restricted or sampled risk sets).
 """
 module Revel
 
@@ -66,7 +66,7 @@ export coef, coefnames, stderror, vcov, confint, loglikelihood, nobs, dof, aic, 
 export gof, n_simulations
 
 # --- memory kernels and layers ------------------------------------------------
-export AbstractMemory, FullMemory, HalfLife, Window, Interval, PowerLaw, LinearDecay,
+export AbstractMemory, FullMemory, HalfLife, Window, IntervalMemory, PowerLaw, LinearDecay,
        KernelMemory
 export kernel_weight, interval_partition
 export EventLayer

@@ -28,13 +28,17 @@ What [`each_risk_set`](@ref) hands its callback for one event:
 - `index` — the event's position in the time-sorted sequence;
 - `event` — the event itself;
 - `dyads` — the risk set, a vector of `(sender, receiver)`;
-- `X` — the `length(dyads) × p` matrix of statistics on it (a reused buffer:
-  copy it to keep it beyond the callback);
+- `X` — the `length(dyads) × p` matrix of statistics on it;
 - `case` — the row of the observed dyad;
 - `tied` — under `ties=:efron`, the rows of every case tied with this one
   (empty otherwise);
 - `tie_weight` — the Efron denominator weight `1 − (j−1)/d` those rows take
-  (`1.0` otherwise).
+  (`1.0` otherwise);
+- `risk_set_size` — the number of dyads in the risk set (`length(dyads)`,
+  unless [`event_design`](@ref) sampled controls from it).
+
+`dyads`, `X` and `tied` are buffers reused from one event to the next: copy
+them to keep them beyond the callback, and do not modify them.
 
 # Example
 ```julia
@@ -55,6 +59,7 @@ struct RiskSetView{T, M<:AbstractMatrix{Float64}}
     case::Int
     tied::Vector{Int}
     tie_weight::Float64
+    risk_set_size::Int
 end
 
 function _stat_names(statistics)
@@ -137,6 +142,9 @@ function _riskset_provider(riskset, n::Int, directed::Bool, sorted::Vector{<:Eve
         return function (m, ev)
             k = 0
             fixed = by_sender ? ev.sender : ev.receiver
+            1 <= fixed <= n || throw(ArgumentError(
+                "event $m ($ev) has $(by_sender ? "sender" : "receiver") $fixed, " *
+                "outside the actors 1:$n of riskset=:$riskset"))
             for a in 1:n
                 a == fixed && continue
                 k += 1
@@ -149,7 +157,12 @@ function _riskset_provider(riskset, n::Int, directed::Bool, sorted::Vector{<:Eve
         allunique(dyads) || throw(ArgumentError("the risk set lists a dyad twice"))
         return (m, ev) -> dyads, Dict(dy => k for (k, dy) in enumerate(dyads))
     elseif riskset isa Function
-        return (m, ev) -> riskset(m, ev)::Vector{Tuple{Int,Int}}, nothing
+        return function (m, ev)
+            dyads = riskset(m, ev)::Vector{Tuple{Int,Int}}
+            allunique(dyads) || throw(ArgumentError(
+                "the risk set returned for event $m ($ev) lists a dyad twice"))
+            return dyads
+        end, nothing
     end
     throw(ArgumentError(
         "riskset must be :full, :active, :sender, :receiver, a vector of " *
@@ -217,9 +230,11 @@ Stream the risk sets of an event sequence: for each event (in time order) call
 it, read off the history **before** the event. Returns the tie policy that
 actually applied (`:none` when the data had no ties).
 
-- `directed` — `false` treats events as undirected: the risk set holds unordered
-  pairs `(i, j)` with `i < j`, and statistics should be built on symmetric
-  layers.
+- `directed` — `false` treats events as undirected: every event is rewritten as
+  the pair `(min, max)` before the history is built, so nothing depends on how a
+  pair happened to be stored, and the risk set holds unordered pairs `(i, j)`
+  with `i < j`. Build the statistics on symmetric layers: a directed statistic
+  would then read the pair in ID order, which carries no meaning.
 - `riskset` — `:full` (every dyad among `1:n_actors`); `:active` (only dyads
   that occur somewhere in the sequence — remify's "active" risk set); `:sender`
   (the observed sender's `n−1` possible receivers: the receiver-choice step of
@@ -235,31 +250,57 @@ actually applied (`:none` when the data had no ties).
   moving-window fits need.
 
 The pass costs `O(events × risk set × statistics)` and holds one design matrix
-at a time.
+at a time. It evaluates private copies of `statistics` (see [`EventLayer`](@ref)),
+so one specification can be streamed from several tasks at once.
 
 # Example
 ```julia
 using Revel
 events = [Event(1, 2, 1.0), Event(2, 1, 2.0), Event(1, 2, 3.0)]
+cases = Vector{Float64}[]
 each_risk_set(events, [Inertia(), Reciprocation()], 3) do view
-    println(view.event, ": ", view.X[view.case, :])
+    push!(cases, view.X[view.case, :])     # copy the row: `X` is reused
 end
-# Event(1 → 2 @ 1.0): [0.0, 0.0]
-# Event(2 → 1 @ 2.0): [0.0, 1.0]
-# Event(1 → 2 @ 3.0): [1.0, 1.0]
+cases     # [[0.0, 0.0], [0.0, 1.0], [1.0, 1.0]] — inertia and reciprocity of each event
 ```
 """
-function each_risk_set(f::F, events::Vector{Event{T}}, statistics, n_actors::Int;
-                       directed::Bool=true, riskset=:full, ties::Symbol=:error,
-                       cases=nothing) where {F, T}
+each_risk_set(f, events::AbstractVector{<:Event}, statistics, n_actors::Int; kwargs...) =
+    _each_risk_set(f, collect(events), statistics, n_actors; kwargs...)
+
+# Event times must be finite, and a self-loop is never in a risk set
+function _check_events(events::AbstractVector{<:Event})
+    for (k, e) in enumerate(events)
+        t = e.time
+        t isa Real && !isfinite(t) && throw(ArgumentError(
+            "event $k ($e) has time $t; event times must be finite"))
+        e.sender == e.receiver && throw(ArgumentError(
+            "event $k ($e) is a self-loop; relational event models have no risk " *
+            "of an actor acting on itself. Drop self-loops before fitting."))
+    end
+    return nothing
+end
+
+# `select(D, case, tied) -> rows`, when given, picks the rows of the risk set to
+# evaluate (the case and the tied cases first): sampled controls cost only the
+# rows drawn, not the whole risk set.
+function _each_risk_set(f::F, events::Vector{Event{T}}, statistics, n_actors::Int;
+                        directed::Bool=true, riskset=:full, ties::Symbol=:error,
+                        cases=nothing, select=nothing) where {F, T}
     check_tie_policy(ties, _DESIGN_TIES_SUPPORTED; model=_DESIGN_TIES_MODEL,
                      reasons=_DESIGN_TIES_REASONS)
     n_actors >= 2 || throw(ArgumentError("need at least two actors"))
-    stats = Tuple(statistics)
+    _check_events(events)
+    _check_standardized(statistics, riskset, n_actors, directed)
+    stats = Tuple(_fresh(collect(statistics)))
     p = length(stats)
     p >= 1 || throw(ArgumentError("need at least one statistic"))
 
     sorted = sort(events; by=e -> e.time)
+    # An undirected event has no orientation: write every pair as (min, max), so
+    # that no statistic can depend on the order in which a pair happened to be
+    # stored
+    directed || (sorted = [Event(minmax(e.sender, e.receiver)..., e.time;
+                                 eventtype=e.eventtype, weight=e.weight) for e in sorted])
     blocks = _tie_blocks(sorted)
     has_ties = any(b -> length(b) > 1, blocks)
     ties === :error && has_ties && _reject_design_ties(sorted, blocks)
@@ -271,6 +312,8 @@ function each_risk_set(f::F, events::Vector{Event{T}}, statistics, n_actors::Int
     X = Matrix{Float64}(undef, 0, p)
     tied = Int[]
     no_tied = Int[]
+    sub = Tuple{Int,Int}[]
+    subtied = Int[]
 
     for block in blocks
         d = length(block)
@@ -282,8 +325,6 @@ function each_risk_set(f::F, events::Vector{Event{T}}, statistics, n_actors::Int
                 D >= 2 || throw(ArgumentError(
                     "the risk set of event $m ($ev) holds $D dyad$(D == 1 ? "" : "s"); " *
                     "a case needs at least one alternative"))
-                size(X, 1) < D && (X = Matrix{Float64}(undef, D, p))
-                _fill_rows!(X, stats, history, dyads, ev.time)
                 case = _row_of(lookup, dyads, _norm_dyad(ev.sender, ev.receiver, directed))
                 case > 0 || throw(ArgumentError(
                     "event $m ($ev) is not in its own risk set; declare the actor " *
@@ -309,7 +350,28 @@ function each_risk_set(f::F, events::Vector{Event{T}}, statistics, n_actors::Int
                     w = 1.0 - (j - 1) / d
                     rows = tied
                 end
-                f(RiskSetView(m, ev, dyads, view(X, 1:D, :), case, rows, w))
+                if select === nothing
+                    size(X, 1) < D && (X = Matrix{Float64}(undef, D, p))
+                    _fill_rows!(X, stats, history, dyads, ev.time)
+                    f(RiskSetView(m, ev, dyads, view(X, 1:D, :), case, rows, w, D))
+                else
+                    # evaluate the drawn rows only, renumbered in the order drawn
+                    picked = select(D, case, rows)::Vector{Int}
+                    empty!(sub)
+                    for row in picked
+                        push!(sub, dyads[row])
+                    end
+                    empty!(subtied)
+                    for row in rows
+                        push!(subtied, findfirst(==(row), picked))
+                    end
+                    K = length(sub)
+                    size(X, 1) < K && (X = Matrix{Float64}(undef, K, p))
+                    _fill_rows!(X, stats, history, sub, ev.time)
+                    f(RiskSetView(m, ev, sub, view(X, 1:K, :),
+                                  findfirst(==(case), picked), isempty(rows) ? rows : subtied,
+                                  w, D))
+                end
             end
             freeze || update_history!(history, ev)
         end
@@ -341,8 +403,10 @@ penalised regression), to inspect for collinearity, or to fit with
 
 `n_controls` keeps the case plus that many dyads drawn without replacement from
 the rest of each risk set (nested case-control sampling; Vu, Pattison & Robins
-2015; Lerner & Lomi 2020), with all randomness from `rng`. `nothing` keeps the
-full risk set, which costs `events × risk set` rows.
+2015; Lerner & Lomi 2020), with all randomness from `rng`. The statistics are
+evaluated on the drawn dyads only, so the cost is `events × (n_controls + 1)`
+evaluations however large the risk set. `nothing` keeps the full risk set,
+which costs `events × risk set` rows.
 
 # Example
 ```julia
@@ -353,10 +417,15 @@ size(design, 1)                       # 18 — three events × six dyads
 design[design.is_event, :reciprocity]  # [0.0, 1.0, 0.0]
 ```
 """
-function event_design(events::Vector{Event{T}}, statistics, n_actors::Int;
-                      directed::Bool=true, riskset=:full, ties::Symbol=:error,
-                      cases=nothing, n_controls::Union{Nothing,Int}=nothing,
-                      rng::AbstractRNG=Random.default_rng()) where T
+function event_design(events::AbstractVector{<:Event}, statistics, n_actors::Int;
+                      kwargs...)
+    return _event_design(collect(events), statistics, n_actors; kwargs...)
+end
+
+function _event_design(events::Vector{Event{T}}, statistics, n_actors::Int;
+                       directed::Bool=true, riskset=:full, ties::Symbol=:error,
+                       cases=nothing, n_controls::Union{Nothing,Int}=nothing,
+                       rng::AbstractRNG=Random.default_rng()) where T
     names = _stat_names(statistics)
     p = length(names)
     n_controls === nothing || n_controls >= 1 || throw(ArgumentError(
@@ -373,7 +442,7 @@ function event_design(events::Vector{Event{T}}, statistics, n_actors::Int;
         s, r = v.dyads[row]
         push!(event_index, v.index); push!(sender, s); push!(receiver, r)
         push!(time, v.event.time); push!(is_event, case_row)
-        push!(stratum, n_strata[]); push!(rs_size, length(v.dyads))
+        push!(stratum, n_strata[]); push!(rs_size, v.risk_set_size)
         push!(prob, sp); push!(tie_weight, weight)
         for k in 1:p
             push!(columns[k], v.X[row, k])
@@ -381,35 +450,53 @@ function event_design(events::Vector{Event{T}}, statistics, n_actors::Int;
         return nothing
     end
 
-    tie_applied = each_risk_set(events, statistics, n_actors; directed=directed,
-                                riskset=riskset, ties=ties, cases=cases) do v
+    chosen = Int[]
+    function draw(D, case, tied)
+        forced_ = isempty(tied) ? 1 : length(tied)
+        # every control kept: the full risk set, in its own order, no draw
+        n_controls >= D - forced_ && return collect(1:D)
+        empty!(chosen)
+        push!(chosen, case)
+        for row in tied
+            row == case || push!(chosen, row)
+        end
+        forced = length(chosen)
+        keep = min(n_controls, D - forced)
+        if 4 * keep < D - forced
+            # few controls from a large risk set: rejection sampling costs the
+            # draws, not the risk set
+            while length(chosen) < forced + keep
+                row = rand(rng, 1:D)
+                row in chosen || push!(chosen, row)
+            end
+        else
+            empty!(pool)
+            for row in 1:D
+                row in chosen || push!(pool, row)
+            end
+            shuffle!(rng, pool)
+            append!(chosen, view(pool, 1:keep))
+        end
+        return sort!(chosen)                 # the design keeps risk-set order
+    end
+
+    tie_applied = _each_risk_set(events, statistics, n_actors; directed=directed,
+                                 riskset=riskset, ties=ties, cases=cases,
+                                 select=n_controls === nothing ? nothing : draw) do v
         n_strata[] += 1
-        D = length(v.dyads)
+        D = v.risk_set_size
         forced = isempty(v.tied) ? 1 : length(v.tied)
         eligible = D - forced
-        keep = n_controls === nothing ? eligible : min(n_controls, eligible)
+        keep = length(v.dyads) - forced
         sp = eligible == 0 ? 1.0 : keep / eligible
-
         push_row!(v, v.case, true, v.tie_weight, sp)
         # The other cases tied with this one stay in the Efron denominator
         for row in v.tied
             row == v.case || push_row!(v, row, false, v.tie_weight, sp)
         end
-        if keep == eligible
-            for row in 1:D
-                (row == v.case || row in v.tied) && continue
-                push_row!(v, row, false, 1.0, sp)
-            end
-        else
-            empty!(pool)
-            for row in 1:D
-                (row == v.case || row in v.tied) && continue
-                push!(pool, row)
-            end
-            shuffle!(rng, pool)
-            for row in view(pool, 1:keep)
-                push_row!(v, row, false, 1.0, sp)
-            end
+        for row in eachindex(v.dyads)
+            (row == v.case || row in v.tied) && continue
+            push_row!(v, row, false, 1.0, sp)
         end
     end
 

@@ -16,7 +16,7 @@ name(::AbstractRevelStatistic)
 build_history
 ```
 
-## The five configurations
+## The parametric statistics
 
 ```@docs
 DyadEffect

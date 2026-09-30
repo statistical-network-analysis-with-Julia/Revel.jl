@@ -5,10 +5,11 @@
 # The same configuration carries a different name and a different default
 # measurement in each package: relevent normalises, remstats counts, rem applies
 # a mandatory (normalised) half-life decay and goldfish dichotomises. The table
-# below is the review's cross-package concordance, restated in terms of the
-# Revel call that reproduces each package's version. "Equivalent" means the same
-# configuration AND the same measurement only where the call spells the
-# measurement out.
+# below restates the cross-package concordance of the literature review in terms
+# of the Revel call that reproduces each package's version. "Equivalent" means
+# the same configuration AND the same measurement only where the call spells the
+# measurement out. A relevent name marked † is relevent's documented definition,
+# which relevent 1.2.1's output does not follow (see `effect_catalogue`).
 
 const _CATALOGUE_COLUMNS = (:revel, :family, :configuration, :relevent, :remstats, :rem,
                             :goldfish, :eventnet, :source)
@@ -19,7 +20,7 @@ const _CATALOGUE = [
     ("Inertia()", "endogenous", "past s → r events", "", "inertia()", "",
      "inertia(weighted = TRUE)", "DYAD_STATISTIC, dir OUT", "Brandes, Lerner & Snijders 2009"),
     ("Inertia(scaling=:prop, empty=1/(n-1))", "endogenous",
-     "share of the sender's past sends that went to r", "FrPSndSnd",
+     "share of the sender's past sends that went to r", "FrPSndSnd †",
      "inertia(scaling = \"prop\")", "", "", "", "Butts 2008; Kitts et al. 2017"),
     ("Inertia(transform=:indicator)", "endogenous", "has s ever sent to r", "", "", "",
      "inertia", "", "Stadtfeld & Block 2017"),
@@ -29,7 +30,7 @@ const _CATALOGUE = [
     ("Reciprocation()", "endogenous", "past r → s events", "", "reciprocity()", "",
      "recip(weighted = TRUE)", "DYAD_STATISTIC, dir IN", "Brandes, Lerner & Snijders 2009"),
     ("Reciprocation(scaling=:prop, empty=1/(n-1))", "endogenous",
-     "share of the sender's past receipts that came from r", "FrRecSnd",
+     "share of the sender's past receipts that came from r", "FrRecSnd †",
      "reciprocity(scaling = \"prop\")", "", "", "", "Butts 2008; Kitts et al. 2017"),
     ("Reciprocation(scaling=:prop, denominator=:receiver_out)", "endogenous",
      "share of the receiver's past sends that went to s", "", "", "", "", "",
@@ -38,45 +39,60 @@ const _CATALOGUE = [
      "half-life weighted r → s volume", "", "", "reciprocityStat", "", "",
      "Brandes, Lerner & Snijders 2009"),
     ("DyadActivity()", "endogenous", "past events between s and r, either way", "", "",
-     "", "", "DYAD_STATISTIC, dir SYM", "Lerner & Lomi 2020"),
+     "", "", "DYAD_STATISTIC, dir SYM", "eventnet"),
     # ---- node degree -----------------------------------------------------------
     ("OutdegreeSender()", "endogenous", "events sent by the sender", "",
      "outdegreeSender()", "degreeStat (sender-outdegree)", "outdeg(type = \"ego\")",
      "DEGREE_STATISTIC, OUT/SOURCE", "Vu et al. 2011"),
     ("OutdegreeSender(scaling=:prop, empty=1/(n-1))", "endogenous",
-     "sender's share of all past sends", "NODSnd", "outdegreeSender(scaling = \"prop\")",
-     "", "", "", "relevent"),
+     "sender's share of all past sends (relevent: 1/(n−1) before any event)", "NODSnd", "", "", "", "", "relevent"),
+    ("OutdegreeSender(scaling=:prop, empty=1/n)", "endogenous",
+     "sender's share of all past sends (remstats: 1/n before any event)", "", "outdegreeSender(scaling = \"prop\")",
+     "", "", "", "remstats"),
     ("IndegreeSender()", "endogenous", "events received by the sender", "",
      "indegreeSender()", "degreeStat (sender-indegree)", "indeg(type = \"ego\")", "",
      "Vu et al. 2011"),
     ("IndegreeSender(scaling=:prop, empty=1/(n-1))", "endogenous",
-     "sender's share of all past receipts", "NIDSnd",
-     "indegreeSender(scaling = \"prop\")", "", "", "", "relevent"),
+     "sender's share of all past receipts (relevent: 1/(n−1) before any event)", "NIDSnd", "", "", "", "", "relevent"),
+    ("IndegreeSender(scaling=:prop, empty=1/n)", "endogenous",
+     "sender's share of all past receipts (remstats: 1/n before any event)", "", "indegreeSender(scaling = \"prop\")",
+     "", "", "", "remstats"),
     ("IndegreeReceiver()", "endogenous", "events received by the receiver", "",
      "indegreeReceiver()", "degreeStat (target-indegree)", "indeg(type = \"alter\")",
      "DEGREE_STATISTIC, IN/TARGET", "Vu et al. 2011"),
     ("IndegreeReceiver(scaling=:prop, empty=1/(n-1))", "endogenous",
-     "receiver's share of all past receipts", "NIDRec",
-     "indegreeReceiver(scaling = \"prop\")", "", "", "", "relevent"),
+     "receiver's share of all past receipts (relevent: 1/(n−1) before any event)", "NIDRec", "", "", "", "", "relevent"),
+    ("IndegreeReceiver(scaling=:prop, empty=1/n)", "endogenous",
+     "receiver's share of all past receipts (remstats: 1/n before any event)", "", "indegreeReceiver(scaling = \"prop\")",
+     "", "", "", "remstats"),
     ("OutdegreeReceiver()", "endogenous", "events sent by the receiver", "",
      "outdegreeReceiver()", "degreeStat (target-outdegree)", "outdeg(type = \"alter\")",
      "", "Vu et al. 2011"),
     ("OutdegreeReceiver(scaling=:prop, empty=1/(n-1))", "endogenous",
-     "receiver's share of all past sends", "NODRec",
-     "outdegreeReceiver(scaling = \"prop\")", "", "", "", "relevent"),
+     "receiver's share of all past sends (relevent: 1/(n−1) before any event)", "NODRec", "", "", "", "", "relevent"),
+    ("OutdegreeReceiver(scaling=:prop, empty=1/n)", "endogenous",
+     "receiver's share of all past sends (remstats: 1/n before any event)", "", "outdegreeReceiver(scaling = \"prop\")",
+     "", "", "", "remstats"),
     ("TotaldegreeSender()", "endogenous", "events sent or received by the sender", "",
      "totaldegreeSender()", "", "", "degree statistic, SYM", "remstats"),
     ("TotaldegreeSender(scaling=:prop, empty=1/(n-1))", "endogenous",
-     "sender's share of all past volume", "NTDegSnd",
-     "totaldegreeSender(scaling = \"prop\")", "", "", "", "relevent"),
+     "sender's share of all past volume (relevent: 1/(n−1) before any event)", "NTDegSnd", "", "", "", "", "relevent"),
+    ("TotaldegreeSender(scaling=:prop, empty=1/n)", "endogenous",
+     "sender's share of all past volume (remstats: 1/n before any event)", "", "totaldegreeSender(scaling = \"prop\")",
+     "", "", "", "remstats"),
     ("TotaldegreeReceiver()", "endogenous", "events sent or received by the receiver",
      "", "totaldegreeReceiver()", "", "", "degree statistic, SYM", "remstats"),
     ("TotaldegreeReceiver(scaling=:prop, empty=1/(n-1))", "endogenous",
-     "receiver's share of all past volume (preferential attachment)", "NTDegRec",
-     "totaldegreeReceiver(scaling = \"prop\")", "", "", "", "Butts 2008"),
+     "receiver's share of all past volume (preferential attachment) (relevent: 1/(n−1) before any event)", "NTDegRec", "", "", "", "", "Butts 2008"),
+    ("TotaldegreeReceiver(scaling=:prop, empty=1/n)", "endogenous",
+     "receiver's share of all past volume (preferential attachment) (remstats: 1/n before any event)", "", "totaldegreeReceiver(scaling = \"prop\")",
+     "", "", "", "remstats"),
     ("OutdegreeSender(measure=:partners)", "endogenous",
-     "distinct partners rather than events", "", "", "", "outdeg(weighted = FALSE)",
-     "", "Vu, Lomi, Mascia & Pallotti 2017"),
+     "distinct partners rather than events (\"degree\")", "", "", "",
+     "outdeg(weighted = FALSE)", "", "Vu, Lomi, Mascia & Pallotti 2017"),
+    ("OutdegreeSender(measure=:intensity)", "endogenous",
+     "events per distinct partner (\"intensity\")", "", "", "", "", "",
+     "Vu, Lomi, Mascia & Pallotti 2017"),
     ("TotaldegreeDyad()", "endogenous", "sum of the two actors' total degrees", "",
      "totaldegreeDyad()", "", "", "", "remstats"),
     ("DegreeMin(symmetric=true)", "endogenous",
@@ -91,8 +107,10 @@ const _CATALOGUE = [
     ("Inertia(symmetric=true)", "endogenous", "undirected: past events of the pair", "",
      "inertia() (undirected)", "", "inertia (choice_coordination)", "", "remstats"),
     ("DegreeAssortativity()", "endogenous", "sender out-degree × receiver in-degree",
-     "", "outdegreeSender():indegreeReceiver()", "", "", "",
-     "Vu, Lomi, Mascia & Pallotti 2017; Lerner & Lomi 2020"),
+     "", "outdegreeSender():indegreeReceiver()", "", "", "", "Lerner & Lomi 2020"),
+    ("DegreeAssortativity(measure=:partners)", "endogenous",
+     "sender's × receiver's distinct partners (\"assortativity by degree\")", "", "", "",
+     "", "", "Vu, Lomi, Mascia & Pallotti 2017"),
     # ---- the two-path ----------------------------------------------------------
     ("OTP()", "endogenous", "s → k → r, Σ min of the legs (transitive closure)",
      "OTPSnd", "otp()", "", "", "TRIANGLE_STATISTIC (\"transitive_tie\")", "Butts 2008"),
@@ -103,11 +121,13 @@ const _CATALOGUE = [
      "Brandes, Lerner & Snijders 2009"),
     ("OTP(combine=:product)", "endogenous", "Σ products of the legs", "", "", "", "", "",
      "Vu et al. 2011; Perry & Wolfe 2013 (\"2-send\")"),
+    ("OTP(combine=:harmonic)", "endogenous", "Σ harmonic means of the legs", "", "", "",
+     "", "", "Vu, Lomi, Mascia & Pallotti 2017"),
     ("ITP()", "endogenous", "r → k → s (cyclic closure)", "ITPSnd", "itp()", "", "",
      "TRIANGLE_STATISTIC (\"cyclical_tie\")", "Butts 2008"),
     ("ITP(combine=:count)", "endogenous", "number of distinct intermediaries", "",
      "itp(unique = TRUE)", "", "cycle", "", "Stadtfeld & Block 2017"),
-    ("OSP()", "endogenous", "s → k ← r (shared targets)", "OSPSnd", "osp()", "", "",
+    ("OSP()", "endogenous", "s → k ← r (shared targets)", "OSPSnd †", "osp()", "", "",
      "closure, both directions OUT", "Butts 2008"),
     ("OSP(combine=:count)", "endogenous", "number of shared targets", "",
      "osp(unique = TRUE)", "", "commonReceiver", "", "Stadtfeld & Block 2017"),
@@ -119,7 +139,7 @@ const _CATALOGUE = [
      "trans (choice_coordination)", "closure, SYM", "remstats"),
     ("TwoPathEffect(layer_a, layer_b)", "endogenous",
      "two-path across two event networks or types", "",
-     "consider_type = \"interact\"", "triadStat(eventtypevalues = )",
+     "", "triadStat(eventtypevalues = )",
      "mixedTrans, mixedCycle, mixedCommonSender, mixedCommonReceiver",
      "different attributes per leg", "Stadtfeld & Block 2017"),
     ("BalanceEffect(:friend_of_friend)", "endogenous",
@@ -127,7 +147,7 @@ const _CATALOGUE = [
      ":enemy_of_friend, :enemy_of_enemy)", "", "", "triadStat(eventtypevalues = )", "",
      "\"enemy of friend\" closure", "Brandes, Lerner & Snijders 2009"),
     ("OTP(ordered=true)", "endogenous", "two-path whose first leg came first", "", "",
-     "", "", "", "Arena, Mulder & Leenders 2022 (approximation)"),
+     "", "", "", "Arena, Mulder & Leenders 2024 (approximation)"),
     # ---- the three-path --------------------------------------------------------
     ("FourCycleEffect()", "endogenous", "s → a ← b → r, Σ min of three weights", "", "",
      "", "", "FOUR_CYCLE_STATISTIC", "Lerner & Lomi 2020"),
@@ -200,9 +220,12 @@ const _CATALOGUE = [
      "tie()", "DYAD_STATISTIC on an exogenous attribute", "Butts 2008"),
     ("GlobalEffect(f)", "exogenous", "covariate of time alone (a moderator)", "",
      "event()", "", "global attribute", "NETWORK_STATISTIC",
-     "Lembo, Juozaitienė, Vinciotti & Wit 2025"),
+     "Lembo, Juozaitienė, Vinciotti & Wit 2026"),
     # ---- interactions --------------------------------------------------------------
     ("Interaction(a, b)", "interaction", "product term", "", "a:b", "", "", "", "remstats"),
+    ("Interaction(GlobalEffect(times, z), stat)", "interaction",
+     "an effect moderated by an attribute of the event being explained", "",
+     "event(\"z\"):stat()", "", "", "", "remstats"),
     ("EventLayer(types=…); split_by_type", "interaction",
      "statistic split by the type of the past events", "",
      "consider_type = \"separate\"", "eventtypevar", "one network per type",
@@ -220,16 +243,19 @@ const _CATALOGUE = [
     ("TertiusEffect(x)", "interaction",
      "aggregate of x over the receiver's in-neighbours", "", "", "", "tertius",
      "*_NEIGHBOR_STAT", "Stadtfeld & Block 2017; Haunss & Hollway 2023"),
+    ("TertiusEffect(x; aggregate=:entropy)", "interaction",
+     "Shannon entropy of the categories of the receiver's in-neighbours", "", "", "",
+     "", "", "Haunss & Hollway 2023 (\"tertius party diversity\")"),
     ("TertiusEffect(x; difference=true)", "interaction",
      "abs(sender's x − that aggregate): homophily at distance two", "", "", "",
      "tertiusDiff", "", "Haunss & Hollway 2023"),
     ("fit_stratified(…; by)", "interaction", "separate fits per stratum of events", "",
-     "", "", "", "", "Amati, Lomi & Mascia 2019"),
+     "", "", "", "", "Vu, Lomi, Mascia & Pallotti 2017"),
     ("fit_moving_window(…; width)", "interaction", "time-varying coefficients", "",
-     "remstimate::remwindow()", "", "", "", "Mulder & Leenders 2019"),
+     "", "", "", "", "Mulder & Leenders 2019"),
     ("Interaction(GlobalEffect(f), stat)", "interaction",
      "effect moderated by a period or a time of day", "", "", "", "",
-     "network statistic interacted downstream", "Lembo et al. 2025"),
+     "network statistic interacted downstream", "Lembo et al. 2026"),
     # ---- hyperevents -----------------------------------------------------------------
     ("HyperedgeSize()", "hyperevent", "number of participants (a moderator only)", "",
      "", "", "", "UHE_SIZE_STAT, DHE_SIZE_STAT", "Lerner, Tranmer, Mowbray & Hâncean 2019"),
@@ -258,7 +284,7 @@ const _CATALOGUE = [
      "sender-specific partial receiver-set repetition", "", "", "", "",
      "DHE_SUB_REPETITION_STAT", "Lerner & Lomi 2023"),
     ("HyperSenderActivity()", "hyperevent", "past events sent by the senders", "", "",
-     "", "", "DHE_SUB_REPETITION_STAT (1, 0)", "Lerner & Lomi 2023"),
+     "", "", "DHE_SUB_REPETITION_STAT (1, 0)", "Lerner, Tranmer, Mowbray & Hâncean 2019"),
     ("HyperReceiverPopularity()", "hyperevent", "past events received by the receivers",
      "", "", "", "", "DHE_SUB_REPETITION_STAT (0, 1)", "Lerner & Lomi 2023"),
     ("HyperReciprocation()", "hyperevent",
@@ -281,7 +307,7 @@ const _CATALOGUE = [
      "Brandes, Lerner & Snijders 2009"),
     ("memory=Window(w)", "memory", "sliding window", "", "memory = \"window\"", "",
      "window", "", "de Nooy 2011; Quintane et al. 2013"),
-    ("memory=Interval(a, b)", "memory", "one interval of the past", "",
+    ("memory=IntervalMemory(a, b)", "memory", "one interval of the past", "",
      "memory = \"interval\"", "", "", "", "Perry & Wolfe 2013"),
     ("memory=PowerLaw(α)", "memory", "power-law decay", "", "", "", "", "",
      "Vu, Lomi, Mascia & Pallotti 2017"),
@@ -292,8 +318,9 @@ const _CATALOGUE = [
     ("weighted=true", "memory", "event weights instead of counts", "",
      "weight column", "weight", "weighted = TRUE", "event weight response",
      "Brandes, Lerner & Snijders 2009"),
-    ("Standardized(stat, n; corrected=true)", "scaling", "z-score across the risk set",
-     "", "scaling = \"std\"", "", "", "", "remstats"),
+    ("Standardized(stat, n; corrected=true)", "scaling",
+     "z-score across the risk set (with riskset=:full)", "", "scaling = \"std\"", "", "", "",
+     "remstats"),
     ("transform=:log1p", "scaling", "log(1 + x)", "", "", "", "transformFun",
      "LOG1P function", "Fritz, Rastelli, Fop & Caimo 2025"),
 ]
@@ -312,19 +339,30 @@ relational-event packages: one row per effect with the `revel` call, its
 The same name does not mean the same number across packages — they differ in
 scaling, in the zero-history value, in how the legs of a two-path are combined
 and in the normalisation of the decay kernel — so each `revel` entry spells out
-the options that reproduce the other package's measurement. The remstats column
-is pinned against remstats 4.1.0 by a golden fixture and the relevent column
-against Relevent.jl's relevent-validated statistics; the rem, goldfish and
-eventnet columns follow those packages' documentation. One remstats difference
-is deliberate: under `memory = "decay"` remstats evaluates the decay at the
-*previous* event's time, Revel at the time of the event being explained.
+the options that reproduce the other package's measurement.
+
+How far each column is verified:
+
+- **remstats** — every statistic call in the column is pinned against remstats
+  4.1.0 by a golden fixture (141 statistic arrays), including `a:b` products,
+  `event()`, `consider_type = "separate"`, `scaling = "prop"`/`"std"`, event
+  weights and the window, interval and decay memories. One difference is
+  deliberate: under `memory = "decay"` remstats evaluates the decay at the
+  *previous* event's time, Revel at the time of the event being explained.
+- **relevent** — pinned against Relevent.jl's relevent-validated statistics,
+  except the three names marked †: `FrPSndSnd`, `FrRecSnd` and `OSPSnd` are
+  given as relevent *documents* them, but relevent 1.2.1's output differs from
+  that documentation (Relevent.jl does not port them for that reason), so
+  Revel does not reproduce relevent's numbers there.
+- **rem, goldfish, eventnet** — follow those packages' documentation and have
+  not been checked by running them.
 
 # Example
 ```julia
 using Revel
 cat = effect_catalogue()
 names(cat)[1:4]                                   # ["revel", "family", "configuration", "relevent"]
-cat[cat.relevent .== "FrPSndSnd", :revel]         # ["Inertia(scaling=:prop, empty=1/(n-1))"]
+cat[cat.relevent .== "NODSnd", :revel]            # ["OutdegreeSender(scaling=:prop, empty=1/(n-1))"]
 cat[cat.goldfish .== "commonReceiver", :revel]    # ["OSP(combine=:count)"]
 ```
 """

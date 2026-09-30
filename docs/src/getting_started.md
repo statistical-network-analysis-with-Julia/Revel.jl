@@ -20,7 +20,7 @@ An event is a sender, a receiver and a time, optionally with a type and a
 weight. Revel re-exports `Event` from REM.jl. Actors are numbered `1:n`, and the
 clock must be numeric.
 
-```julia
+```@example getting_started
 using Revel
 
 events = [Event(1, 2, 1.0), Event(2, 1, 2.5), Event(1, 3, 3.0),
@@ -30,20 +30,24 @@ events = [Event(1, 2, 1.0), Event(2, 1, 2.5), Event(1, 3, 3.0),
 ## Statistics
 
 A statistic answers one question about a candidate event `s → r`, given the
-events that came before it. `compute` evaluates it against a history:
+events that came before it. `compute` evaluates it against a history at a time
+`t`, reading the events of the history at or before `t` — so one history of a
+whole sequence can be evaluated at any point of it. The history must be in time
+order.
 
-```julia
+```@example getting_started
 history = build_history(events)
 
 compute(Inertia(), history, 1, 2, 5.0)          # past 1 → 2 events: 1.0
 compute(Reciprocation(), history, 1, 3, 5.0)    # past 3 → 1 events: 1.0
 compute(OutdegreeSender(), history, 1, 2, 5.0)  # events sent by 1: 2.0
+compute(OutdegreeSender(), history, 1, 2, 2.0)  # at t = 2 only the first event: 1.0
 ```
 
-Every endogenous statistic takes the same measurement keywords, which select
-how the past is remembered:
+The configuration effects (dyad, degree, two-path, three-path) take the same
+measurement keywords, which select how the past is remembered:
 
-```julia
+```@example getting_started
 compute(Inertia(memory=HalfLife(1.0)), history, 1, 2, 5.0)   # 0.5^4 = 0.0625
 compute(Inertia(memory=Window(2.0)), history, 1, 2, 5.0)     # 0.0 — too long ago
 compute(Reciprocation(types=:reply), history, 1, 3, 5.0)     # 1.0
@@ -55,7 +59,7 @@ compute(Reciprocation(weighted=true), history, 1, 3, 5.0)    # 2.0
 Simulate a sequence in which actors repeat themselves and answer one another,
 and recover the coefficients:
 
-```julia
+```@example getting_started
 using Random
 
 stats = [Inertia(transform=:log1p), Reciprocation(transform=:log1p)]
@@ -67,7 +71,7 @@ fit
 
 `fit_revel` returns a [`RevelFit`](@ref), which answers the StatsAPI verbs:
 
-```julia
+```@example getting_started
 coef(fit)
 stderror(fit)
 confint(fit)
@@ -76,7 +80,7 @@ aic(fit), bic(fit)
 
 and says exactly what was done:
 
-```julia
+```@example getting_started
 using Networks
 
 Networks.is_exact(fit)          # true — the full risk set, no ties
@@ -85,10 +89,10 @@ Networks.fit_metadata(fit)
 
 ## Checking the model
 
-```julia
+```@example getting_started
 prediction_summary(fit)                         # how highly were the events ranked?
 score_test(fit, [OTP(transform=:log1p)])        # is a closure effect missing?
-score_process_test(fit; n_sim=200, rng=Xoshiro(2))   # are the effects constant?
+score_process_test(fit; n_sim=200, rng=Xoshiro(2))   # does the model hold over the sequence?
 gof(fit; n_sim=50, rng=Xoshiro(3))              # does it reproduce the sequence?
 ```
 
@@ -98,7 +102,7 @@ gof(fit; n_sim=50, rng=Xoshiro(3))              # does it reproduce the sequence
   shares.
 - [Endogenous effects](guide/effects.md) and [covariates](guide/covariates.md) —
   the catalogue.
-- [Interactions](guide/interactions.md) — five ways to let a covariate moderate
+- [Interactions](guide/interactions.md) — six ways to let a covariate moderate
   an effect, and why they are not the same model.
 - [Fitting](guide/fitting.md) — risk sets, ties, actor-oriented and two-mode
   models.

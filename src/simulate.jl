@@ -27,9 +27,10 @@ end
 
 """
     simulate_events(statistics, coefficients, n_actors, n_events;
-                    rng=Random.default_rng(), times=nothing, baseline=nothing,
-                    directed=true, riskset=:full, senders=nothing,
-                    history=Event{Float64}[], eventtype=:event, weights=nothing)
+                    rng=Random.default_rng(), times=nothing, ties=:ordered,
+                    baseline=nothing, t0=nothing, directed=true, riskset=:full,
+                    senders=nothing, history=Event{Float64}[], eventtype=:event,
+                    weights=nothing)
         -> Vector{Event{Float64}}
 
 Simulate a relational event sequence from a model: at each step the next dyad is
@@ -43,10 +44,15 @@ The clock is one of three:
 - `times=` — the given event times are used, in order. This is how a fitted
   ordinal model is simulated for goodness of fit: conditional on the observed
   timestamps, so that time-based memory (a half-life in clock units) keeps its
-  meaning;
+  meaning. With `ties=:breslow` or `:efron` the events drawn at one timestamp do
+  not see each other — the history is frozen across the tie, as it is in a fit
+  with those policies; `:ordered` (default) adds each event to the history as it
+  is drawn;
 - `baseline=λ₀` — waiting times are exponential with rate `λ₀ Σ exp(θ'x)`, the
-  interval-timing model. The hazard is held constant between events, so every
-  statistic must be constant between events ([`FullMemory`](@ref) layers).
+  interval-timing model, starting from `t0` (default: the last event of
+  `history`, or 0). The hazard is held constant between events, so every
+  statistic must be constant between events (see [`fit_revel`](@ref) for which
+  are).
 
 `riskset` is `:full`, a vector of dyads (e.g. [`two_mode_dyads`](@ref)), or
 `:sender` together with `senders=` (a vector giving the sender of each event) to
@@ -73,11 +79,12 @@ issorted(e.time for e in timed)          # true
 function simulate_events(statistics, coefficients::AbstractVector{<:Real},
                          n_actors::Int, n_events::Int;
                          rng::AbstractRNG=Random.default_rng(), times=nothing,
-                         baseline::Union{Nothing,Real}=nothing, directed::Bool=true,
+                         ties::Symbol=:ordered, baseline::Union{Nothing,Real}=nothing,
+                         t0::Union{Nothing,Real}=nothing, directed::Bool=true,
                          riskset=:full, senders=nothing,
                          history::AbstractVector{<:Event}=Event{Float64}[],
                          eventtype=:event, weights=nothing)
-    stats = Tuple(statistics)
+    stats = Tuple(_fresh(collect(statistics)))
     p = length(stats)
     p >= 1 || throw(ArgumentError("need at least one statistic"))
     length(coefficients) == p || throw(ArgumentError(
@@ -91,8 +98,14 @@ function simulate_events(statistics, coefficients::AbstractVector{<:Real},
     if times !== nothing
         length(times) == n_events || throw(ArgumentError(
             "$(length(times)) event times for n_events = $n_events"))
+        all(isfinite, times) || throw(ArgumentError("`times` must be finite"))
         issorted(times) || throw(ArgumentError("`times` must be non-decreasing"))
     end
+    ties in (:ordered, :breslow, :efron) || throw(ArgumentError(
+        "ties must be :ordered, :breslow or :efron, got :$ties"))
+    freeze = ties !== :ordered && times !== nothing
+    t0 === nothing || baseline !== nothing || throw(ArgumentError(
+        "`t0` is the start of the simulated clock and needs `baseline`"))
     if baseline !== nothing
         baseline > 0 || throw(ArgumentError("baseline rate must be positive"))
         for stat in stats
@@ -116,6 +129,8 @@ function simulate_events(statistics, coefficients::AbstractVector{<:Real},
             "sender of each event"))
         length(senders) == n_events || throw(ArgumentError(
             "$(length(senders)) senders for n_events = $n_events"))
+        all(a -> 1 <= a <= n_actors, senders) || throw(ArgumentError(
+            "every sender must be one of the actors 1:$n_actors"))
         directed || throw(ArgumentError("riskset=:sender needs directed events"))
     elseif !(riskset === :full || riskset isa AbstractVector)
         throw(ArgumentError(
@@ -132,8 +147,11 @@ function simulate_events(statistics, coefficients::AbstractVector{<:Real},
                                eventtype=e.eventtype, weight=e.weight) for e in history));
                 by=e -> e.time)
     h = build_history(seed)
-    t = isempty(seed) ? 0.0 : seed[end].time
+    t = t0 !== nothing ? Float64(t0) : isempty(seed) ? 0.0 : seed[end].time
+    isempty(seed) || t >= seed[end].time || throw(ArgumentError(
+        "t0 = $t is before the last event of `history`"))
     out = Event{Float64}[]
+    pending = Event{Float64}[]
     sizehint!(out, n_events)
     D = length(dyads)
     η = Vector{Float64}(undef, D)
@@ -157,8 +175,17 @@ function simulate_events(statistics, coefficients::AbstractVector{<:Real},
         s, r = dyads[d]
         ev = Event(s, r, t; eventtype=eventtype isa Symbol ? eventtype : Symbol(eventtype[m]),
                    weight=weights === nothing ? 1.0 : Float64(weights[m]))
-        update_history!(h, ev)
         push!(out, ev)
+        if freeze
+            # a tie block ends when the next timestamp differs
+            push!(pending, ev)
+            if m == n_events || times[m + 1] != times[m]
+                foreach(e -> update_history!(h, e), pending)
+                empty!(pending)
+            end
+        else
+            update_history!(h, ev)
+        end
     end
     return out
 end

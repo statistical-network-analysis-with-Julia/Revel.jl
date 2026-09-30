@@ -2,12 +2,11 @@
 # Exogenous effects
 # =============================================================================
 #
-# The forms are inherited from Cox regression and ERGM/SAOM practice (review
-# §"Exogenous effects: inherited forms, REM-specific identification"); what the
+# The forms are inherited from Cox regression and ERGM/SAOM practice; what the
 # REM literature added is an identification rule — a term that is constant across
 # the risk set of an event cannot be estimated from an ordinal likelihood. That
-# is why `GlobalEffect` exists only to be interacted, and why a sender covariate
-# drops out of a receiver-choice model.
+# is why `GlobalEffect` enters a model only inside an interaction, and why a
+# sender covariate drops out of a receiver-choice model.
 #
 # Relevent.jl already ports relevent's four covariate effects (`CovSnd`,
 # `CovRec`, `CovInt`, `CovEvent`) and REM.jl eventnet's attribute statistics on
@@ -15,8 +14,8 @@
 # dyadic forms, covariates that change over time, and both compute interfaces.
 
 """
-    Covariate(values; name="x")
-    Covariate(times, values; name="x")
+    Covariate(values; name="x", categorical=false)
+    Covariate(times, values; name="x", categorical=false)
 
 An actor-level covariate, indexed by actor ID.
 
@@ -27,8 +26,9 @@ remstats' and goldfish's changing attributes.
 
 Non-numeric `values` (strings, symbols) are treated as categories: they work
 with [`MatchEffect`](@ref) and the matching filters, and the numeric effects
-refuse them. An actor without a value is an `ArgumentError`, never a silent
-zero.
+refuse them. `categorical=true` treats numbers as category labels too (team
+numbers, say). An actor without a value is an `ArgumentError`, never a silent
+zero, and so is a `missing` value: an unobserved attribute is not a category.
 
 # Example
 ```julia
@@ -38,6 +38,7 @@ load = Covariate([0.0, 10.0], [1.0 3.0; 2.0 2.0; 0.5 0.5]; name="load")
 covariate_value(load, 1, 5.0)     # 1.0
 covariate_value(load, 1, 12.0)    # 3.0
 covariate_value(role, 2, 0.0)     # 2.0 — the code of :lead
+Covariate([1, 1, 2]; name="team", categorical=true).categorical   # true
 ```
 """
 struct Covariate
@@ -48,9 +49,20 @@ struct Covariate
     label::String
 end
 
-function _encode(values::AbstractArray)
+function _encode(values::AbstractArray; categorical::Bool=false)
+    # An unobserved attribute is not a category of its own (the ecosystem's
+    # missing-data contract): two missing values would otherwise "match"
+    if any(ismissing, values)
+        where_ = findall(ismissing, values)
+        throw(ArgumentError(
+            "a Covariate cannot hold `missing` (at $(length(where_)) position" *
+            "$(length(where_) == 1 ? "" : "s"), first $(first(where_))): an unobserved " *
+            "value is not a category, and treating it as one makes two missing " *
+            "values match. Impute the values, or leave the actors out of the actor " *
+            "universe."))
+    end
     # numbers are numeric whatever the container's element type says
-    all(v -> v isa Real, values) &&
+    !categorical && all(v -> v isa Real, values) &&
         return Matrix{Float64}(reshape(values, size(values, 1), :)), false, Any[]
     levels = Any[]
     codes = Matrix{Float64}(undef, size(values, 1), size(values, 2))
@@ -62,22 +74,23 @@ function _encode(values::AbstractArray)
     return codes, true, levels
 end
 
-function Covariate(values::AbstractVector; name::AbstractString="x")
+function Covariate(values::AbstractVector; name::AbstractString="x",
+                   categorical::Bool=false)
     isempty(values) && throw(ArgumentError("a Covariate needs at least one actor"))
-    codes, categorical, levels = _encode(values)
+    codes, categorical, levels = _encode(values; categorical=categorical)
     all(isfinite, codes) || throw(ArgumentError("Covariate $name: values must be finite"))
     return Covariate([-Inf], codes, categorical, levels, String(name))
 end
 
 function Covariate(times::AbstractVector{<:Real}, values::AbstractMatrix;
-                   name::AbstractString="x")
+                   name::AbstractString="x", categorical::Bool=false)
     size(values, 2) == length(times) || throw(ArgumentError(
         "Covariate $name: $(length(times)) change times for $(size(values, 2)) " *
         "columns of values (one column per time is required)"))
     isempty(times) && throw(ArgumentError("Covariate $name: needs at least one time"))
     issorted(times; lt=<=) || throw(ArgumentError(
         "Covariate $name: change times must be strictly increasing"))
-    codes, categorical, levels = _encode(values)
+    codes, categorical, levels = _encode(values; categorical=categorical)
     all(isfinite, codes) || throw(ArgumentError("Covariate $name: values must be finite"))
     return Covariate(collect(Float64, times), codes, categorical, levels, String(name))
 end
@@ -436,13 +449,20 @@ A covariate of time alone — time of day, a weekday, a period after a shock:
 `f(t)`, or the piecewise-constant `values[k]` from `times[k]`.
 
 A global covariate is the same for every dyad in a risk set, so its **main
-effect is not identified** by an ordinal (partial) likelihood — a model holding
-one on its own is refused as singular. Its use is as a moderator:
+effect is not identified** by the ordinary ordinal (partial) likelihood, which
+does not depend on its coefficient: [`fit_revel`](@ref) refuses a model that
+holds one outside an [`Interaction`](@ref). Its use there is as a moderator:
 `Interaction(GlobalEffect(…), Reciprocation())` asks whether reciprocity is
 stronger in some periods, and that product *is* identified ("effectively
-dyadic", Lembo, Juozaitienė, Vinciotti & Wit 2025). This is the product-term
+dyadic", Lembo, Juozaitienė, Vinciotti & Wit 2026). This is the product-term
 counterpart of fitting separate models per period with
 [`fit_stratified`](@ref).
+
+Lembo et al. (2026) also recover the main effects of global covariates, with a
+partial likelihood whose controls are drawn at shifted times (a time-shifted
+nested case-control design); that estimator is not implemented here. The
+interval-timing model identifies them too, but a `GlobalEffect` changes between
+events and is refused there.
 
 # Example
 ```julia
@@ -479,20 +499,21 @@ _uses_history(::GlobalEffect) = false
 # Covariates read through the network: tertius and matched degrees
 # -----------------------------------------------------------------------------
 
-const _AGGREGATES = (:mean, :sum, :max, :min, :sd, :range)
+const _AGGREGATES = (:mean, :sum, :max, :min, :sd, :range, :entropy)
 
-function _aggregate(kind::Symbol, n::Float64, sw::Float64, sx::Float64, sxx::Float64,
-                    lo::Float64, hi::Float64, empty::Float64)
+# `μ` and `m2` are the running (weighted) mean and sum of squared deviations of
+# Welford's update, which has no cancellation for large values with a small spread
+function _aggregate(kind::Symbol, n::Float64, sw::Float64, sx::Float64, μ::Float64,
+                    m2::Float64, lo::Float64, hi::Float64, empty::Float64)
     n > 0 || return empty
-    kind === :mean && return sw > 0 ? sx / sw : empty
+    kind === :mean && return sw > 0 ? μ : empty
     kind === :sum && return sx
     kind === :max && return hi
     kind === :min && return lo
     kind === :range && return hi - lo
-    # :sd — the (weighted) standard deviation of the neighbours' values
+    # :sd — the (weighted) population standard deviation of the neighbours' values
     sw > 0 || return empty
-    μ = sx / sw
-    return sqrt(max(0.0, sxx / sw - μ * μ))
+    return sqrt(max(0.0, m2 / sw))
 end
 
 """
@@ -511,8 +532,11 @@ actor addressed more when those already addressing it score high on `x`?
   `type="alter"`) or `:sender` (`type="ego"`).
 - `direction` — `:in` (actors who sent to that endpoint) or `:out` (actors it
   sent to).
-- `aggregate` — `:mean`, `:sum`, `:max`, `:min`, `:sd` or `:range` (the last two
-  measure diversity, as in the "tertius party diversity" effect).
+- `aggregate` — `:mean`, `:sum`, `:max`, `:min`, `:sd` (the weighted population
+  standard deviation) or `:range` for a numeric covariate; `:entropy` for a
+  categorical one — the Shannon entropy `−Σ p_c log p_c` of the neighbours'
+  categories, the diversity measure of the "tertius party diversity" effect of
+  Haunss & Hollway (2023).
 - `tie_weighted` — weight each neighbour by the layer weight of its tie.
 - `difference=true` — return `abs(x[sender] - aggregate)`, goldfish's
   `tertiusDiff`: homophily at path distance two, the only way to express
@@ -533,6 +557,8 @@ h = build_history([Event(2, 4, 1.0), Event(3, 4, 2.0)])
 compute(TertiusEffect(power), h, 1, 4, 3.0)                       # 4.0 — mean of 5 and 3
 compute(TertiusEffect(power; aggregate=:max), h, 1, 4, 3.0)       # 5.0
 compute(TertiusEffect(power; difference=true), h, 1, 4, 3.0)      # 3.0 — abs(1 − 4)
+party = [:a, :green, :red, :a]
+compute(TertiusEffect(party; aggregate=:entropy), h, 1, 4, 3.0)   # log(2) — two parties, one each
 ```
 """
 struct TertiusEffect{L<:EventLayer, F} <: AbstractRevelStatistic
@@ -547,6 +573,7 @@ struct TertiusEffect{L<:EventLayer, F} <: AbstractRevelStatistic
     empty::Float64
     transform::F
     label::String
+    counts::Vector{Float64}          # category weights (`:entropy` only)
 end
 
 function TertiusEffect(x; layer=nothing, role::Symbol=:receiver, direction::Symbol=:in,
@@ -562,14 +589,25 @@ function TertiusEffect(x; layer=nothing, role::Symbol=:receiver, direction::Symb
     layer_kw, rest = _split_layer_kwargs(kwargs)
     _no_extra_kwargs(rest, "TertiusEffect")
     L = _resolve_layer(layer; layer_kw...)
-    c = _require_numeric(_covariate(x), "TertiusEffect")
+    c = _covariate(x)
+    if aggregate === :entropy
+        c.categorical || throw(ArgumentError(
+            "aggregate=:entropy measures the diversity of categories and needs a " *
+            "categorical covariate; :$(c.label) is numeric (use :sd or :range)"))
+        difference && throw(ArgumentError(
+            "difference=true compares the sender's value with the aggregate, which " *
+            "needs a numeric aggregate, not :entropy"))
+    else
+        _require_numeric(c, "TertiusEffect(aggregate=:$aggregate)")
+    end
     f = _transform_fn(transform)
     base = (difference ? "tertiusDiff" : "tertius") * ".$(c.label)" *
            (aggregate === :mean ? "" : ".$(aggregate)") *
            (role === :receiver ? "" : ".sender") * (direction === :in ? "" : ".out")
     return TertiusEffect{typeof(L), typeof(f)}(
         c, L, role, direction, aggregate, tie_weighted, difference, exclude_other,
-        Float64(empty), f, _label(name, _auto_name(base, _suffix(L), f)))
+        Float64(empty), f, _label(name, _auto_name(base, _suffix(L), f)),
+        zeros(length(c.levels)))
 end
 
 function _value(stat::TertiusEffect, events, s::Int, r::Int, t::Float64)
@@ -577,7 +615,9 @@ function _value(stat::TertiusEffect, events, s::Int, r::Int, t::Float64)
     st = _sync!(L, events, t)
     v, other = stat.role === :receiver ? (r, s) : (s, r)
     incoming = stat.direction === :in
-    n = 0.0; sw = 0.0; sx = 0.0; sxx = 0.0; lo = Inf; hi = -Inf
+    entropy = stat.aggregate === :entropy
+    entropy && fill!(stat.counts, 0.0)
+    n = 0.0; sw = 0.0; sx = 0.0; μ = 0.0; m2 = 0.0; lo = Inf; hi = -Inf
     for k in (incoming ? _in_nb(st, v) : _out_nb(st, v))
         k == v && continue
         stat.exclude_other && k == other && continue
@@ -585,17 +625,30 @@ function _value(stat::TertiusEffect, events, s::Int, r::Int, t::Float64)
         w > 0 || continue
         xk = covariate_value(stat.x, k, t)
         wk = stat.tie_weighted ? w : 1.0
-        n += 1.0; sw += wk; sx += wk * xk; sxx += wk * xk * xk
+        n += 1.0; sw += wk; sx += wk * xk
+        δ = xk - μ
+        μ += wk * δ / sw
+        m2 += wk * δ * (xk - μ)
         lo = min(lo, xk); hi = max(hi, xk)
+        entropy && (@inbounds stat.counts[Int(xk)] += wk)
     end
     n > 0 || return Float64(stat.transform(stat.empty))
-    agg = _aggregate(stat.aggregate, n, sw, sx, sxx, lo, hi, stat.empty)
+    agg = entropy ? _entropy(stat.counts, sw) :
+          _aggregate(stat.aggregate, n, sw, sx, μ, m2, lo, hi, stat.empty)
     stat.difference && (agg = abs(covariate_value(stat.x, s, t) - agg))
     return Float64(stat.transform(agg))
 end
 
+function _entropy(counts::Vector{Float64}, total::Float64)
+    h = 0.0
+    @inbounds for c in counts
+        c > 0 && (h -= (c / total) * log(c / total))
+    end
+    return h
+end
+
 _interval_constant(stat::TertiusEffect) =
-    _is_static(stat.x) && _memory_interval_constant(stat.layer.memory)
+    _is_static(stat.x) && _layer_interval_constant(stat.layer)
 
 """
     MatchedDegree(x; role=:receiver, similarity=nothing, transform=identity,
@@ -606,16 +659,19 @@ endpoint on covariate `x` — the attribute-filtered statistic of Brandenberger'
 `rem` package.
 
 - `role=:receiver` (default): the weight of past events **to the receiver** from
-  actors `k` with `x[k] == x[sender]`. This is the contagion statistic of
-  Malang, Brandenberger & Leifeld (2019) — does an actor join a target once
-  others of its own kind (party family, department) have?
+  actors `k` with `x[k] == x[sender]`. This is the partisan-influence statistic
+  of Malang, Brandenberger & Leifeld (2019, H1a) — does an actor join a target
+  once others of its own kind (party family, department) have? They note that
+  it cannot tell influence from the other diffusion mechanisms that produce the
+  same pattern.
 - `role=:sender`: the weight of past events **from the sender** to actors `k`
   with `x[k] == x[receiver]` — does the sender already deal with the receiver's
   kind?
 
 The candidate's own dyad is excluded, so the statistic is not confounded with
 inertia. `similarity=(a, b) -> Real` replaces the equality match with a graded
-weight. A filter of this kind answers "do same-kind actors' past events raise
+weight; it receives the covariate's values (the categories themselves, for a
+categorical covariate). A filter of this kind answers "do same-kind actors' past events raise
 the rate?", which a product term `IndegreeReceiver × x` does not.
 
 # Example
@@ -662,7 +718,7 @@ function _value(stat::MatchedDegree, events, s::Int, r::Int, t::Float64)
             w > 0 || continue
             xk = covariate_value(stat.x, k, t)
             total += w * (stat.similarity === nothing ? Float64(xk == ref) :
-                          Float64(stat.similarity(ref, xk)))
+                          Float64(stat.similarity(_level(stat.x, ref), _level(stat.x, xk))))
         end
     else
         ref = covariate_value(stat.x, r, t)
@@ -672,11 +728,14 @@ function _value(stat::MatchedDegree, events, s::Int, r::Int, t::Float64)
             w > 0 || continue
             xk = covariate_value(stat.x, k, t)
             total += w * (stat.similarity === nothing ? Float64(xk == ref) :
-                          Float64(stat.similarity(ref, xk)))
+                          Float64(stat.similarity(_level(stat.x, ref), _level(stat.x, xk))))
         end
     end
     return Float64(stat.transform(total))
 end
 
+# The value a similarity function sees: the category itself, not its code
+_level(c::Covariate, code::Float64) = c.categorical ? c.levels[Int(code)] : code
+
 _interval_constant(stat::MatchedDegree) =
-    _is_static(stat.x) && _memory_interval_constant(stat.layer.memory)
+    _is_static(stat.x) && _layer_interval_constant(stat.layer)

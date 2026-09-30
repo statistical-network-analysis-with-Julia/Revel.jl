@@ -8,7 +8,7 @@ Tranmer 2021; Lerner & Lomi 2023). This page covers the hyperevent module of
 Revel: the data structure, the statistics, the sampling of non-events, fitting,
 and what is not implemented.
 
-```julia
+```@example hyperevents
 using Revel, Random
 ```
 
@@ -21,7 +21,7 @@ met once as a group; in the second, actors 4, 5 and 6 met in three separate
 pairs. After the expansion both are a triangle with every pair weight equal to
 one.
 
-```julia
+```@example hyperevents
 history = build_hyper_history([
     HyperEvent([1, 2, 3], 1.0),                                        # one meeting of three
     HyperEvent([4, 5], 2.0), HyperEvent([4, 6], 3.0), HyperEvent([5, 6], 4.0)])
@@ -63,7 +63,7 @@ two-actor undirected hyperevents is `Inertia(symmetric=true)`.
 A [`HyperEvent`](@ref) is undirected when it is given one actor set and directed
 when it is given two:
 
-```julia
+```@example hyperevents
 meeting = HyperEvent([3, 1, 2], 1.0)                 # participants, time
 meeting.senders, meeting.receivers                   # ([1, 2, 3], Int64[])
 
@@ -83,7 +83,7 @@ A [`HyperHistory`](@ref) is the past against which a statistic is evaluated.
 [`update_hyper_history!`](@ref) appends to it; a history holds either directed or
 undirected hyperevents, not both.
 
-```julia
+```@example hyperevents
 h = build_hyper_history([HyperEvent([1, 2, 3], 1.0), HyperEvent([1, 2], 2.0),
                          HyperEvent([2, 3, 4], 3.0)])
 length(h)                                                  # 3
@@ -113,9 +113,10 @@ order** of the candidate. Four choices are therefore orthogonal, and every
 endogenous statistic on this page takes them as keywords:
 
 - the subset order — a positional argument, `p` or `(p, q)`;
-- `aggregate` — `:mean` (the default), `:sum`, `:min`, `:max`, `:sd`, `:absdiff`;
+- `aggregate` — `:mean` (the default), `:sum`, `:min`, `:max`, `:sd`,
+  `:samplesd`, `:absdiff`, `:assortativity`;
 - `memory` — any memory kernel of the package ([`FullMemory`](@ref),
-  [`HalfLife`](@ref), [`Window`](@ref), [`Interval`](@ref), [`PowerLaw`](@ref),
+  [`HalfLife`](@ref), [`Window`](@ref), [`IntervalMemory`](@ref), [`PowerLaw`](@ref),
   [`LinearDecay`](@ref), [`KernelMemory`](@ref)). The papers use an exponential
   half-life following Brandes, Lerner & Snijders (2009);
 - `weighted` and `types` — add each past event's `weight` instead of counting
@@ -124,7 +125,7 @@ endogenous statistic on this page takes them as keywords:
 `transform` (`:log1p`, `:sqrt`, a function) rescales the result and `name`
 overrides the column name.
 
-```julia
+```@example hyperevents
 compute(SubsetRepetition(2; aggregate=:sum), h, [1, 2, 3], Int[], 4.0)            # 5.0
 compute(SubsetRepetition(2; memory=HalfLife(1.0)), h, [1, 2], Int[], 4.0)         # 1/8 + 1/4
 compute(SubsetRepetition(2; memory=Window(1.5)), h, [2, 3], Int[], 4.0)           # 1.0
@@ -155,10 +156,12 @@ the price of high-order subset repetition on large hyperedges.
 
 **Subset repetition** of order one is individual activity (preferential
 attachment), order two dyadic familiarity, order three triadic familiarity.
-Lower orders belong in the model alongside higher ones; Lerner & Lomi (2023)
-report that the order-one effect turns non-significant once higher orders enter.
+Lower orders belong in the model alongside higher ones, so that a higher-order
+effect is not credited with what individual activity explains; in Lerner &
+Lomi's (2023) models the order-one effect stays in, and significant, next to the
+higher orders.
 
-```julia
+```@example hyperevents
 # deg(1) = 2, deg(2) = 3, deg(3) = 2
 compute(SubsetRepetition(1), h, [1, 2, 3], Int[], 4.0)                     # 7/3
 # deg{1,2} = 2, deg{1,3} = 1, deg{2,3} = 2
@@ -174,26 +177,29 @@ actors `w`, each valued by the weaker of its two legs. The papers find a
 *negative* closure effect next to positive subset repetition — overlapping but
 stable groups that do not merge (Lerner et al. 2021; Lerner & Hâncean 2023).
 
-```julia
+```@example hyperevents
 # pair {1,4}: through 2, min(W12, W42) = min(2, 1) = 1; through 3, min(W13, W43) = 1
 compute(HyperClosure(), h, [1, 4], Int[], 4.0)                             # 2.0
 compute(HyperClosure(combine=:product), h, [1, 4], Int[], 4.0)             # 2·1 + 1·1 = 3.0
 compute(HyperClosure(normalize=:thirds, n_actors=4), h, [1, 4], Int[], 4.0)   # 2/(4 − 2) = 1.0
 ```
 
-`combine` is `:min` (the papers; the default) or `:product` (eventnet's
-default); `parallel` combines the paths through different third actors by `:sum`
-or `:max`; `aggregate` combines the pairs.
+`combine` is `:min` (the papers; the default) or `:product` (the default of
+eventnet's hyperevent closure, by its documentation — not checked by running
+it); `parallel` combines the paths through different third actors by `:sum` or
+`:max`; `aggregate` combines the pairs.
 
 **Prior success** reads the event `weight` as the outcome of a past hyperevent:
 
-```julia
+```@example hyperevents
 papers = build_hyper_history([HyperEvent([1, 2], 1.0; weight=10.0),
                               HyperEvent([2, 3], 2.0; weight=4.0)])
 compute(PriorSuccess(1), papers, [1, 2, 3], Int[], 3.0)    # (10 + 14 + 4)/(1 + 2 + 1) = 7.0
 compute(PriorSuccess(2), papers, [1, 2, 3], Int[], 3.0)    # (10 + 0 + 4)/(1 + 0 + 1) = 7.0
 # the outcome-weighted hyperedge degree alone
 compute(SubsetRepetition(2; weighted=true, aggregate=:sum), papers, [1, 2, 3], Int[], 3.0)   # 14.0
+# prior success disparity: the sample sd of the summed outcomes 10, 14, 4
+compute(SubsetRepetition(1; weighted=true, aggregate=:samplesd), papers, [1, 2, 3], Int[], 3.0)   # ≈ 5.03
 ```
 
 **Hyperedge size** has no counterpart in a dyadic model, and a caveat of its
@@ -201,7 +207,7 @@ own: the design below compares each event with alternatives of the *same* size,
 so a statistic that depends on the size alone is constant within every stratum
 and cannot be estimated. Use it as a moderator:
 
-```julia
+```@example hyperevents
 by_size = Interaction(HyperedgeSize(), SubsetRepetition(2))
 compute(by_size, h, [1, 2, 3], Int[], 4.0)                 # 3 × 5/3 = 5.0
 name(by_size)                                              # "size:subrep(2)"
@@ -232,7 +238,7 @@ a hyperevent has one sender `i` and a receiver set `J`, are thin constructors:
 | [`OutInPopularity`](@ref) | `(1, 0)`, `:in` | `Σ_{j ∈ J} deg_out(j) / abs(J)` |
 | [`InteractionAmongReceivers`](@ref)`(p)` | — | `Σ_{j ∈ J, J′ ⊆ J∖{j}} hy_deg(j, J′) / (abs(J) · C(abs(J) − 1, p))` |
 
-```julia
+```@example hyperevents
 mails = build_hyper_history([HyperEvent([1], [2, 3], 1.0), HyperEvent([1], [2, 4], 2.0),
                              HyperEvent([2], [1, 3], 3.0), HyperEvent([4], [2, 3], 4.0)])
 S, R = [1], [2, 3]                      # candidate: 1 → {2, 3}
@@ -257,7 +263,7 @@ third actor `k`:
 | `:shared_senders` | `W(k,i)`, `W(k,j)` | shared senders (2019), incoming balance (2023), sender balance, sibling |
 | `:shared_receivers` | `W(i,k)`, `W(j,k)` | shared receivers (2019), outgoing balance (2023), receiver balance, cosibling |
 
-```julia
+```@example hyperevents
 # 1 → {3}: through 2, min(W12, W23) = min(2, 1); through 4, min(W14, W43) = min(1, 1)
 compute(HyperClosure(:transitive), mails, [1], [3], 5.0)        # 2.0
 # through 2, min(W21, W23) = 1; actor 4 never addressed 1
@@ -273,17 +279,19 @@ actor, or a [`Covariate`](@ref), which may vary over time — over the candidate
 (mean absolute difference over pairs) or `:catdiff` (share of pairs with
 different values, for a categorical covariate). With `endpoint=:all` on a
 directed hyperedge the pairs of `:absdiff` and `:catdiff` are the (sender,
-receiver) pairs, as in eventnet.
+receiver) pairs, as in eventnet. The covariate homogeneity of Lerner et al.
+(2021) is `aggregate=:homogeneity`, for a 0/1 covariate.
 
 | Effect | Arguments |
 |---|---|
 | covariate average (Lerner et al. 2021) | `aggregate=:mean` |
-| covariate homogeneity / heterophily (Lerner et al. 2021) | `aggregate=:absdiff` or `:sd` |
+| covariate homogeneity of a binary covariate (Lerner et al. 2021) | `aggregate=:homogeneity` |
+| covariate dispersion within the hyperedge | `aggregate=:absdiff`, `:sd` or `:samplesd` |
 | receiver-set average (Lerner & Lomi 2023) | `endpoint=:receivers, aggregate=:mean` |
 | sender–receiver heterophily (Lerner & Lomi 2023) | `endpoint=:all, aggregate=:absdiff` on directed hyperedges |
 | receiver-set heterophily (Lerner & Lomi 2023) | `endpoint=:receivers, aggregate=:absdiff` |
 
-```julia
+```@example hyperevents
 age = [30.0, 40.0, 50.0, 20.0]
 compute(HyperCovariate(age), h, [1, 2, 3], Int[], 4.0)                              # 40.0
 compute(HyperCovariate(age; aggregate=:absdiff), h, [1, 2, 3], Int[], 4.0)          # (10 + 20 + 10)/3
@@ -304,7 +312,7 @@ corresponds to a baseline rate stratified by hyperedge size.
 
 [`hyper_design`](@ref) builds that design as a `DataFrame`:
 
-```julia
+```@example hyperevents
 events = [HyperEvent([1, 2], 1.0), HyperEvent([1, 2, 3], 2.0), HyperEvent([1, 2], 3.0)]
 design = hyper_design(events, [SubsetRepetition(2)], 5; n_controls=3, rng=Xoshiro(1))
 size(design, 1)                           # 12 — three events × (1 case + 3 controls)
@@ -324,11 +332,14 @@ one column per statistic. The frame is also what to take to another estimator.
 - `risk_set_size` is the number of possible hyperedges of the observed size —
   `C(n, p)` undirected, `C(n, p)·C(n − p, q)` directed — and saturates at
   `typemax(Int)` instead of overflowing.
-- `sampler=:receivers` keeps the observed senders and draws receiver sets only.
-  This is the design of Lerner & Lomi (2023), whose baseline is stratified by
-  sender and receiver-set size; a statistic of the senders alone is then
-  constant within every stratum.
-- `actors` restricts the actors at risk; `ties` is `:error` (the default),
+- For directed hyperevents the default design keeps the observed senders and
+  draws receiver sets only (`sampler=:receivers`). This is the design of Lerner
+  & Lomi (2023), whose baseline is stratified by sender and receiver-set size;
+  a statistic of the senders alone is then constant within every stratum.
+  `sampler=:uniform` draws whole hyperedges instead, which assumes every sender
+  set is equally likely to act and is biased when senders differ in activity.
+- `actors` restricts the actors at risk — a set, or a function
+  `(index, event) -> actors` when actors join or leave during the sequence; `ties` is `:error` (the default),
   `:ordered` or `:breslow`, with the meaning they have in
   [`each_risk_set`](@ref). `:efron` and `:batch` are refused with the reason.
 - All randomness comes from `rng`.
@@ -340,7 +351,7 @@ one column per statistic. The frame is also what to take to another estimator.
 its own. The result is a [`HyperFit`](@ref), which answers the StatsAPI verbs
 and the result-metadata protocol by forwarding them to the underlying fit.
 
-```julia
+```@example hyperevents
 x = [0.0, 1.0, 0.0, 1.0, 0.5, -1.0, 2.0, 0.3]
 truth = [SubsetRepetition(2; memory=HalfLife(30.0), transform=:log1p),
          HyperCovariate(x; name="x")]
@@ -360,11 +371,17 @@ Non-convergence, collinearity and separation are reported by `REM.fit_rem` as
 for any other model.
 
 The guidance of the dyadic literature carries over. Cumulative statistics grow
-without bound, so scale them — the papers apply a square root or `log1p` — or
-use a decaying memory; and a model with subset repetition of order `p` should
+without bound, so scale them — the hyperevent papers take a square root or
+standardise; `log1p`, used in these examples, is another choice — or use a
+decaying memory; and a model with subset repetition of order `p` should
 include the lower orders.
 
-```julia
+The default `n_controls=20` keeps the examples fast. The papers use about 100
+controls per event (or more), and the spread of the estimates from one draw of
+controls to the next falls as `n_controls` grows; refit with another `rng` to
+see it.
+
+```@example hyperevents
 richer = [SubsetRepetition(1; transform=:log1p), SubsetRepetition(2; transform=:log1p),
           HyperClosure(transform=:log1p),
           Interaction(HyperedgeSize(), SubsetRepetition(2; transform=:log1p))]
@@ -372,10 +389,10 @@ fit2 = rhem(meetings, richer, 8; n_controls=20, rng=Xoshiro(3))
 length(coef(fit2))                   # 4
 ```
 
-A directed model is fitted the same way. `sampler=:receivers` gives the
-receiver-choice design of Lerner & Lomi (2023):
+A directed model is fitted the same way; its default design is the
+receiver-choice design of Lerner & Lomi (2023), written out here:
 
-```julia
+```@example hyperevents
 dstats = [SenderReceiverSetRepetition(1; transform=:log1p),
           ReceiverSetRepetition(2; transform=:log1p),
           HyperReciprocation(transform=:log1p)]
@@ -399,7 +416,7 @@ hyperedges sampled uniformly, which is an approximation: keep the network small,
 or raise `candidates`, when the simulation must follow the model exactly, as in
 a parameter-recovery study.
 
-```julia
+```@example hyperevents
 sim = simulate_hyperevents([SubsetRepetition(2; transform=:log1p)], [1.0], 6, 50;
                            sizes=[2, 3, 3], rng=Xoshiro(6))
 length(sim), sim[end].time           # (50, 50.0)
@@ -418,11 +435,22 @@ length(sim), sim[end].time           # (50, 50.0)
   `HyperClosure(normalize=:thirds, n_actors=n)` gives the former (dividing by
   `n − 2`), the default `normalize=:none` the latter.
 - **Min or product.** The papers combine the two legs of a two-path by their
-  minimum; eventnet's closure statistic defaults to the product.
+  minimum; eventnet's hyperevent closure statistic, by its documentation,
+  defaults to the product. (Its *dyadic* triangle statistics default to the
+  minimum: two different statistics.)
+- **The 2019 preprint** (Lerner, Tranmer, Mowbray & Hâncean 2019) differs from
+  the later papers, and from this implementation, in further details of its
+  model — among them how it treats hyperedge size and how it weights a past
+  event by its size. Revel follows the papers from 2021 onward; a size
+  weighting can be expressed with `weighted=true` and event weights.
+- **The present.** A statistic evaluated at time `t` reads the events at or
+  before `t`; the papers' `E < t` differs only for an event at exactly `t`,
+  which the design never evaluates (the history holds the events before the
+  one being explained).
 - **Terminology.** Sub-repetition (2019), subset repetition (2021), partial
   receiver-set repetition (2023) and `subrep` (2025) are one family; shared
   senders / shared receivers (2019), incoming / outgoing balance (2023), sender
-  / receiver balance (Poda, Vinciotti & Wit 2025) and sibling / cosibling (Perry
+  / receiver balance (Poda, Vinciotti & Wit 2026) and sibling / cosibling (Perry
   & Wolfe 2013) are one pair.
 - **"Reply to all"** is operationalised twice: as unordered repetition (2023),
   which is [`UnorderedRepetition`](@ref), and as switch reciprocation of order
@@ -430,11 +458,11 @@ length(sim), sim[end].time           # (50, 50.0)
 - **The exponential kernel** has two normalisations; see
   [Memory and Layers](layers.md).
 
-Three readings were chosen where the sources leave room, and are stated in the
+Two readings were chosen where the sources leave room, and are stated in the
 docstrings: `direction=:sym` of [`DirectedSubsetRepetition`](@ref)`(p, q)` is
-subset repetition of order `p + q` on the participant sets; the third actor of a
-closure may be another member of the candidate (as in Lerner & Lomi 2023, `a ≠
-i, j`); and the 2019 third-actor count is taken to be `n − 2`.
+subset repetition of order `p + q` on the participant sets, and the 2019
+third-actor count is taken to be `n − 2`. The third actor of a closure may be
+another member of the candidate, as Lerner & Lomi (2023) define it (`a ≠ i, j`).
 
 ## Not implemented
 
@@ -452,19 +480,17 @@ for it, rather than approximated:
 - **Closure of general order `(p, q, l)`** and **switch reciprocation of order
   `l`** (Lerner et al. 2019); only closure with single actors at the three
   corners is available.
-- **Prior success disparity** (Lerner & Hâncean 2023) as a named statistic:
-  `SubsetRepetition(1; weighted=true, aggregate=:sd)` is the standard deviation
-  of the members' summed past outcomes, one reading of its definition.
 - **Subset repetition summed over all orders**, retaliation and interval-censored
-  hyperevents (Poda, Vinciotti & Wit 2025).
+  hyperevents (Poda, Vinciotti & Wit 2026).
 - **eventnet's four-cycle and neighbour statistics**, the node attribute on the
   third actor of a closure, and the `PRODUCT` aggregation function.
 - **Time-varying and non-linear effects** of hyperedge statistics (Boschi,
   Lerner & Wit 2026), the **relational hyperevent outcome model** and the
   group-oriented factorisation into an author model and a citation model.
-- **Goodness of fit** for hyperevent fits: `gof`, [`event_diagnostics`](@ref)
-  and [`prediction_summary`](@ref) are defined on dyads. Simulate from the fitted
-  model with [`simulate_hyperevents`](@ref) and compare summaries of your own.
+- **Goodness of fit** for hyperevent fits: `gof`, [`event_diagnostics`](@ref),
+  [`prediction_summary`](@ref) and the score tests are defined on dyads and
+  refuse a `HyperFit`. Simulate from the fitted model with
+  [`simulate_hyperevents`](@ref) and compare summaries of your own.
 - **The Efron tie correction** and a likelihood for the *timing* of hyperevents
   (the design models which hyperedge, given that an event of that size occurs).
 

@@ -11,7 +11,7 @@ AbstractMemory
 FullMemory
 HalfLife
 Window
-Interval
+IntervalMemory
 PowerLaw
 LinearDecay
 KernelMemory

@@ -8,16 +8,17 @@ carried from one package to another without knowing four things: the kernel
 normalisation, the zero-history value, how the legs of a triad are combined, and
 the scaling.
 
-The tables below restate the cross-package concordance of the review in terms
-of the Revel call that reproduces each package's measurement. They are
+The tables below restate the cross-package concordance of the literature review
+behind this package in terms of the Revel call that reproduces each package's
+measurement. They are
 [`effect_catalogue`](@ref) rendered — `effect_catalogue()` returns the same rows
 as a `DataFrame`.
 
-```julia
+```@example concordance
 using Revel
 
 catalogue = effect_catalogue()
-catalogue[catalogue.relevent .== "FrPSndSnd", [:revel, :remstats]]
+catalogue[catalogue.relevent .== "NODSnd", [:revel, :relevent]]
 catalogue[catalogue.goldfish .== "commonReceiver", :revel]      # ["OSP(combine=:count)"]
 ```
 
@@ -25,28 +26,35 @@ catalogue[catalogue.goldfish .== "commonReceiver", :revel]      # ["OSP(combine=
 
 | Column | Status |
 |---|---|
-| remstats | **Pinned numerically** against remstats 4.1.0 by a golden fixture (`test/fixtures/revel_remstats.toml`): 131 statistic arrays, directed and undirected, under full, window, interval and decay memory, with `prop` and `std` scaling and event weights. |
-| relevent | **Pinned numerically** against Relevent.jl's statistics, which are themselves validated against `relevent::rem.dyad` 1.2.1. |
+| remstats | **Pinned numerically**, every statistic call of the column, against remstats 4.1.0 by a golden fixture (`test/fixtures/revel_remstats.toml`): 141 statistic arrays, directed and undirected, under full, window, interval and decay memory, with `prop` and `std` scaling, event weights, `consider_type = "separate"`, `a:b` products and `event()`. The fitting functions in the table (`remstimate`) are not pinned. |
+| relevent | **Pinned numerically** against Relevent.jl's statistics, which are themselves validated against `relevent::rem.dyad` 1.2.1 — except the three names marked **†** (`FrPSndSnd`, `FrRecSnd`, `OSPSnd`). Those are relevent's *documented* definitions; relevent 1.2.1's output differs from its documentation (a "fraction" above 1, shared partners counted twice), Relevent.jl does not port them for that reason, and Revel reproduces the documentation, not the output. |
 | rem, goldfish, eventnet | From those packages' documentation and source, as read for the review. **Not executed.** |
 
 ## Six traps
 
-1. **`FrPSndSnd` is a proportion.** Its counterparts are
-   `Inertia(scaling=:prop)` and remstats `inertia(scaling = "prop")`, not the
-   default `inertia()`. goldfish's default `inertia` is a 0/1 indicator.
-2. **Shared-partner names invert.** goldfish `commonReceiver` is [`OSP`](@ref)
-   (both actors sent to a common third) and `commonSender` is [`ISP`](@ref).
+1. **`FrPSndSnd` is a proportion.** Its documented definition is
+   `Inertia(scaling=:prop)`, as is remstats `inertia(scaling = "prop")`, not
+   the default `inertia()`. goldfish's default `inertia` is a 0/1 indicator.
+2. **Shared-partner names follow the partner, not the pair.** goldfish
+   `commonReceiver` is [`OSP`](@ref): the third actor is a common *receiver*,
+   so the sender and the receiver of the candidate both *sent* to it ("outbound"
+   from their side). `commonSender` is [`ISP`](@ref).
 3. **`CovInt` is a sum, not an interaction.** It is [`SumEffect`](@ref): the
    sender's value plus the receiver's under one coefficient.
-4. **Triads are aggregated four ways.** Sum of minima (relevent, remstats,
-   eventnet), square root of summed products (rem), count of distinct third
-   actors (goldfish, remstats `unique = TRUE`), sum of products (Perry & Wolfe):
-   the `combine` and `root` keywords.
+4. **Triads are aggregated at least five ways.** Sum of minima (relevent,
+   remstats; eventnet's dyadic triangle statistics by its documentation), square
+   root of summed products (rem), count of distinct third actors (goldfish,
+   remstats `unique = TRUE`), sum of products (Perry & Wolfe; Vu et al. 2011),
+   sum of harmonic means (Vu, Lomi, Mascia & Pallotti 2017): the `combine` and
+   `root` keywords. (eventnet's hyperevent closure is a different statistic;
+   see [`HyperClosure`](@ref).)
 5. **There are at least three four-cycle statistics**: see
    [`FourCycleEffect`](@ref).
-6. **The zero-history value differs.** relevent and remstats return `1/(n−1)`
-   for a proportion with an empty denominator and `1/n` for a degree share
-   before the first event; it is the `empty` keyword.
+6. **The zero-history value differs, between the packages too.** For a
+   proportion with an empty denominator (inertia, reciprocity) relevent and
+   remstats both return `1/(n−1)`. For a degree share before the first event
+   relevent returns `1/(n−1)` and remstats `1/n`, so the degree-share rows come
+   in pairs. Revel's default is `0`; the `empty` keyword sets it.
 
 ## Deliberate differences from remstats
 
@@ -81,47 +89,56 @@ replaces the clock by the event index, which is `clock=:order`.
 | Revel | Measures | relevent | remstats | rem | goldfish | eventnet | Source |
 |---|---|---|---|---|---|---|---|
 | `Inertia()` | past s → r events |  | `inertia()` |  | `inertia(weighted = TRUE)` | DYAD_STATISTIC, dir OUT | Brandes, Lerner & Snijders 2009 |
-| `Inertia(scaling=:prop, empty=1/(n-1))` | share of the sender's past sends that went to r | `FrPSndSnd` | `inertia(scaling = "prop")` |  |  |  | Butts 2008; Kitts et al. 2017 |
+| `Inertia(scaling=:prop, empty=1/(n-1))` | share of the sender's past sends that went to r | `FrPSndSnd †` | `inertia(scaling = "prop")` |  |  |  | Butts 2008; Kitts et al. 2017 |
 | `Inertia(transform=:indicator)` | has s ever sent to r |  |  |  | `inertia` |  | Stadtfeld & Block 2017 |
 | `Inertia(memory=HalfLife(h; normalized=true), weighted=true)` | half-life weighted s → r volume |  |  | `inertiaStat` |  |  | Brandes, Lerner & Snijders 2009 |
 | `Reciprocation()` | past r → s events |  | `reciprocity()` |  | `recip(weighted = TRUE)` | DYAD_STATISTIC, dir IN | Brandes, Lerner & Snijders 2009 |
-| `Reciprocation(scaling=:prop, empty=1/(n-1))` | share of the sender's past receipts that came from r | `FrRecSnd` | `reciprocity(scaling = "prop")` |  |  |  | Butts 2008; Kitts et al. 2017 |
+| `Reciprocation(scaling=:prop, empty=1/(n-1))` | share of the sender's past receipts that came from r | `FrRecSnd †` | `reciprocity(scaling = "prop")` |  |  |  | Butts 2008; Kitts et al. 2017 |
 | `Reciprocation(scaling=:prop, denominator=:receiver_out)` | share of the receiver's past sends that went to s |  |  |  |  |  | Kitts et al. 2017 |
 | `Reciprocation(memory=HalfLife(h; normalized=true), weighted=true)` | half-life weighted r → s volume |  |  | `reciprocityStat` |  |  | Brandes, Lerner & Snijders 2009 |
-| `DyadActivity()` | past events between s and r, either way |  |  |  |  | DYAD_STATISTIC, dir SYM | Lerner & Lomi 2020 |
+| `DyadActivity()` | past events between s and r, either way |  |  |  |  | DYAD_STATISTIC, dir SYM | eventnet |
 | `OutdegreeSender()` | events sent by the sender |  | `outdegreeSender()` | `degreeStat (sender-outdegree)` | `outdeg(type = "ego")` | DEGREE_STATISTIC, OUT/SOURCE | Vu et al. 2011 |
-| `OutdegreeSender(scaling=:prop, empty=1/(n-1))` | sender's share of all past sends | `NODSnd` | `outdegreeSender(scaling = "prop")` |  |  |  | relevent |
+| `OutdegreeSender(scaling=:prop, empty=1/(n-1))` | sender's share of all past sends (relevent: 1/(n−1) before any event) | `NODSnd` |  |  |  |  | relevent |
+| `OutdegreeSender(scaling=:prop, empty=1/n)` | sender's share of all past sends (remstats: 1/n before any event) |  | `outdegreeSender(scaling = "prop")` |  |  |  | remstats |
 | `IndegreeSender()` | events received by the sender |  | `indegreeSender()` | `degreeStat (sender-indegree)` | `indeg(type = "ego")` |  | Vu et al. 2011 |
-| `IndegreeSender(scaling=:prop, empty=1/(n-1))` | sender's share of all past receipts | `NIDSnd` | `indegreeSender(scaling = "prop")` |  |  |  | relevent |
+| `IndegreeSender(scaling=:prop, empty=1/(n-1))` | sender's share of all past receipts (relevent: 1/(n−1) before any event) | `NIDSnd` |  |  |  |  | relevent |
+| `IndegreeSender(scaling=:prop, empty=1/n)` | sender's share of all past receipts (remstats: 1/n before any event) |  | `indegreeSender(scaling = "prop")` |  |  |  | remstats |
 | `IndegreeReceiver()` | events received by the receiver |  | `indegreeReceiver()` | `degreeStat (target-indegree)` | `indeg(type = "alter")` | DEGREE_STATISTIC, IN/TARGET | Vu et al. 2011 |
-| `IndegreeReceiver(scaling=:prop, empty=1/(n-1))` | receiver's share of all past receipts | `NIDRec` | `indegreeReceiver(scaling = "prop")` |  |  |  | relevent |
+| `IndegreeReceiver(scaling=:prop, empty=1/(n-1))` | receiver's share of all past receipts (relevent: 1/(n−1) before any event) | `NIDRec` |  |  |  |  | relevent |
+| `IndegreeReceiver(scaling=:prop, empty=1/n)` | receiver's share of all past receipts (remstats: 1/n before any event) |  | `indegreeReceiver(scaling = "prop")` |  |  |  | remstats |
 | `OutdegreeReceiver()` | events sent by the receiver |  | `outdegreeReceiver()` | `degreeStat (target-outdegree)` | `outdeg(type = "alter")` |  | Vu et al. 2011 |
-| `OutdegreeReceiver(scaling=:prop, empty=1/(n-1))` | receiver's share of all past sends | `NODRec` | `outdegreeReceiver(scaling = "prop")` |  |  |  | relevent |
+| `OutdegreeReceiver(scaling=:prop, empty=1/(n-1))` | receiver's share of all past sends (relevent: 1/(n−1) before any event) | `NODRec` |  |  |  |  | relevent |
+| `OutdegreeReceiver(scaling=:prop, empty=1/n)` | receiver's share of all past sends (remstats: 1/n before any event) |  | `outdegreeReceiver(scaling = "prop")` |  |  |  | remstats |
 | `TotaldegreeSender()` | events sent or received by the sender |  | `totaldegreeSender()` |  |  | degree statistic, SYM | remstats |
-| `TotaldegreeSender(scaling=:prop, empty=1/(n-1))` | sender's share of all past volume | `NTDegSnd` | `totaldegreeSender(scaling = "prop")` |  |  |  | relevent |
+| `TotaldegreeSender(scaling=:prop, empty=1/(n-1))` | sender's share of all past volume (relevent: 1/(n−1) before any event) | `NTDegSnd` |  |  |  |  | relevent |
+| `TotaldegreeSender(scaling=:prop, empty=1/n)` | sender's share of all past volume (remstats: 1/n before any event) |  | `totaldegreeSender(scaling = "prop")` |  |  |  | remstats |
 | `TotaldegreeReceiver()` | events sent or received by the receiver |  | `totaldegreeReceiver()` |  |  | degree statistic, SYM | remstats |
-| `TotaldegreeReceiver(scaling=:prop, empty=1/(n-1))` | receiver's share of all past volume (preferential attachment) | `NTDegRec` | `totaldegreeReceiver(scaling = "prop")` |  |  |  | Butts 2008 |
-| `OutdegreeSender(measure=:partners)` | distinct partners rather than events |  |  |  | `outdeg(weighted = FALSE)` |  | Vu, Lomi, Mascia & Pallotti 2017 |
+| `TotaldegreeReceiver(scaling=:prop, empty=1/(n-1))` | receiver's share of all past volume (preferential attachment) (relevent: 1/(n−1) before any event) | `NTDegRec` |  |  |  |  | Butts 2008 |
+| `TotaldegreeReceiver(scaling=:prop, empty=1/n)` | receiver's share of all past volume (preferential attachment) (remstats: 1/n before any event) |  | `totaldegreeReceiver(scaling = "prop")` |  |  |  | remstats |
+| `OutdegreeSender(measure=:partners)` | distinct partners rather than events ("degree") |  |  |  | `outdeg(weighted = FALSE)` |  | Vu, Lomi, Mascia & Pallotti 2017 |
+| `OutdegreeSender(measure=:intensity)` | events per distinct partner ("intensity") |  |  |  |  |  | Vu, Lomi, Mascia & Pallotti 2017 |
 | `TotaldegreeDyad()` | sum of the two actors' total degrees |  | `totaldegreeDyad()` |  |  |  | remstats |
 | `DegreeMin(symmetric=true)` | undirected: smaller of the two actors' event counts |  | `degreeMin()` |  |  |  | remstats |
 | `DegreeMax(symmetric=true)` | undirected: larger of the two actors' event counts |  | `degreeMax()` |  |  |  | remstats |
 | `DegreeDiff(symmetric=true)` | undirected: absolute difference of the two actors' event counts |  | `degreeDiff()` |  |  |  | remstats; Lerner, Hâncean & Perc 2025 |
 | `Inertia(symmetric=true)` | undirected: past events of the pair |  | `inertia() (undirected)` |  | `inertia (choice_coordination)` |  | remstats |
-| `DegreeAssortativity()` | sender out-degree × receiver in-degree |  | `outdegreeSender():indegreeReceiver()` |  |  |  | Vu, Lomi, Mascia & Pallotti 2017; Lerner & Lomi 2020 |
+| `DegreeAssortativity()` | sender out-degree × receiver in-degree |  | `outdegreeSender():indegreeReceiver()` |  |  |  | Lerner & Lomi 2020 |
+| `DegreeAssortativity(measure=:partners)` | sender's × receiver's distinct partners ("assortativity by degree") |  |  |  |  |  | Vu, Lomi, Mascia & Pallotti 2017 |
 | `OTP()` | s → k → r, Σ min of the legs (transitive closure) | `OTPSnd` | `otp()` |  |  | TRIANGLE_STATISTIC ("transitive_tie") | Butts 2008 |
 | `OTP(combine=:count)` | number of distinct intermediaries |  | `otp(unique = TRUE)` |  | `trans` |  | Stadtfeld & Block 2017 |
 | `OTP(combine=:product, root=true, memory=HalfLife(h; normalized=true))` | √ Σ products of half-life weights |  |  | `triadStat` |  |  | Brandes, Lerner & Snijders 2009 |
 | `OTP(combine=:product)` | Σ products of the legs |  |  |  |  |  | Vu et al. 2011; Perry & Wolfe 2013 ("2-send") |
+| `OTP(combine=:harmonic)` | Σ harmonic means of the legs |  |  |  |  |  | Vu, Lomi, Mascia & Pallotti 2017 |
 | `ITP()` | r → k → s (cyclic closure) | `ITPSnd` | `itp()` |  |  | TRIANGLE_STATISTIC ("cyclical_tie") | Butts 2008 |
 | `ITP(combine=:count)` | number of distinct intermediaries |  | `itp(unique = TRUE)` |  | `cycle` |  | Stadtfeld & Block 2017 |
-| `OSP()` | s → k ← r (shared targets) | `OSPSnd` | `osp()` |  |  | closure, both directions OUT | Butts 2008 |
+| `OSP()` | s → k ← r (shared targets) | `OSPSnd †` | `osp()` |  |  | closure, both directions OUT | Butts 2008 |
 | `OSP(combine=:count)` | number of shared targets |  | `osp(unique = TRUE)` |  | `commonReceiver` |  | Stadtfeld & Block 2017 |
 | `ISP()` | s ← k → r (shared sources) | `ISPSnd` | `isp()` |  |  | closure, both directions IN | Butts 2008 |
 | `ISP(combine=:count)` | number of shared sources |  | `isp(unique = TRUE)` |  | `commonSender` |  | Stadtfeld & Block 2017 |
 | `SharedPartners()` | undirected shared partners |  | `sp()` |  | `trans (choice_coordination)` | closure, SYM | remstats |
-| `TwoPathEffect(layer_a, layer_b)` | two-path across two event networks or types |  | `consider_type = "interact"` | `triadStat(eventtypevalues = )` | `mixedTrans, mixedCycle, mixedCommonSender, mixedCommonReceiver` | different attributes per leg | Stadtfeld & Block 2017 |
+| `TwoPathEffect(layer_a, layer_b)` | two-path across two event networks or types |  |  | `triadStat(eventtypevalues = )` | `mixedTrans, mixedCycle, mixedCommonSender, mixedCommonReceiver` | different attributes per leg | Stadtfeld & Block 2017 |
 | `BalanceEffect(:friend_of_friend)` | signed two-path on undirected ± weights (also :friend_of_enemy, :enemy_of_friend, :enemy_of_enemy) |  |  | `triadStat(eventtypevalues = )` |  | "enemy of friend" closure | Brandes, Lerner & Snijders 2009 |
-| `OTP(ordered=true)` | two-path whose first leg came first |  |  |  |  |  | Arena, Mulder & Leenders 2022 (approximation) |
+| `OTP(ordered=true)` | two-path whose first leg came first |  |  |  |  |  | Arena, Mulder & Leenders 2024 (approximation) |
 | `FourCycleEffect()` | s → a ← b → r, Σ min of three weights |  |  |  |  | FOUR_CYCLE_STATISTIC | Lerner & Lomi 2020 |
 | `FourCycleEffect(combine=:product, root=true, memory=HalfLife(h; normalized=true))` | cube root of Σ products |  |  | `fourCycleStat` |  |  | Brandenberger (rem) |
 | `FourCycleEffect(combine=:count)` | number of three-paths |  |  |  | `four` |  | Stadtfeld & Block 2017; Haunss & Hollway 2023 |
@@ -155,22 +172,24 @@ replaces the clock by the event index, which is `clock=:order`.
 | `MaximumEffect(x)` | larger of the two values |  | `maximum()` |  |  | MAX aggregation | remstats |
 | `ProductEffect(x, y)` | sender's x × receiver's y |  | `send("x"):receive("y")` |  | `egoAlterInt()` | PRODUCT aggregation | Perry & Wolfe 2013 |
 | `TieEffect(matrix)` | dyadic covariate | `CovEvent` | `tie()` |  | `tie()` | DYAD_STATISTIC on an exogenous attribute | Butts 2008 |
-| `GlobalEffect(f)` | covariate of time alone (a moderator) |  | `event()` |  | `global attribute` | NETWORK_STATISTIC | Lembo, Juozaitienė, Vinciotti & Wit 2025 |
+| `GlobalEffect(f)` | covariate of time alone (a moderator) |  | `event()` |  | `global attribute` | NETWORK_STATISTIC | Lembo, Juozaitienė, Vinciotti & Wit 2026 |
 
 ### Interactions
 
 | Revel | Measures | relevent | remstats | rem | goldfish | eventnet | Source |
 |---|---|---|---|---|---|---|---|
 | `Interaction(a, b)` | product term |  | `a:b` |  |  |  | remstats |
+| `Interaction(GlobalEffect(times, z), stat)` | an effect moderated by an attribute of the event being explained |  | `event("z"):stat()` |  |  |  | remstats |
 | `EventLayer(types=…); split_by_type` | statistic split by the type of the past events |  | `consider_type = "separate"` | `eventtypevar` | `one network per type` | one attribute per event type | Brandes, Lerner & Snijders 2009 |
 | `EventLayer(keep=…)` | statistic on an attribute-filtered history |  |  | `eventfiltervar` |  |  | Brandenberger (rem) |
 | `MatchedDegree(x)` | degree over third actors who match the other endpoint on x |  |  | `degreeStat with filters` |  | *_NEIGHBOR_STAT | Malang, Brandenberger & Leifeld 2019 |
 | `OTP(third=matching_third(x))` | closure through third actors who match the sender on x |  |  | `triadStat(eventfilterAI = )` |  | closure with a node attribute | rem; eventnet |
 | `TertiusEffect(x)` | aggregate of x over the receiver's in-neighbours |  |  |  | `tertius` | *_NEIGHBOR_STAT | Stadtfeld & Block 2017; Haunss & Hollway 2023 |
+| `TertiusEffect(x; aggregate=:entropy)` | Shannon entropy of the categories of the receiver's in-neighbours |  |  |  |  |  | Haunss & Hollway 2023 ("tertius party diversity") |
 | `TertiusEffect(x; difference=true)` | abs(sender's x − that aggregate): homophily at distance two |  |  |  | `tertiusDiff` |  | Haunss & Hollway 2023 |
-| `fit_stratified(…; by)` | separate fits per stratum of events |  |  |  |  |  | Amati, Lomi & Mascia 2019 |
-| `fit_moving_window(…; width)` | time-varying coefficients |  | `remstimate::remwindow()` |  |  |  | Mulder & Leenders 2019 |
-| `Interaction(GlobalEffect(f), stat)` | effect moderated by a period or a time of day |  |  |  |  | network statistic interacted downstream | Lembo et al. 2025 |
+| `fit_stratified(…; by)` | separate fits per stratum of events |  |  |  |  |  | Vu, Lomi, Mascia & Pallotti 2017 |
+| `fit_moving_window(…; width)` | time-varying coefficients |  |  |  |  |  | Mulder & Leenders 2019 |
+| `Interaction(GlobalEffect(f), stat)` | effect moderated by a period or a time of day |  |  |  |  | network statistic interacted downstream | Lembo et al. 2026 |
 
 ### Hyperevents
 
@@ -185,7 +204,7 @@ replaces the clock by the event index, which is `clock=:order`.
 | `UnorderedRepetition()` | past events among the same actors in any roles ("reply to all") |  |  |  |  | DHE_REPETITION_STAT, dir SYM | Lerner & Lomi 2023 |
 | `ReceiverSetRepetition(p)` | partial receiver-set repetition of order p |  |  |  |  | DHE_SUB_REPETITION_STAT, endpoint TARGET | Lerner & Lomi 2023 |
 | `SenderReceiverSetRepetition(p)` | sender-specific partial receiver-set repetition |  |  |  |  | DHE_SUB_REPETITION_STAT | Lerner & Lomi 2023 |
-| `HyperSenderActivity()` | past events sent by the senders |  |  |  |  | DHE_SUB_REPETITION_STAT (1, 0) | Lerner & Lomi 2023 |
+| `HyperSenderActivity()` | past events sent by the senders |  |  |  |  | DHE_SUB_REPETITION_STAT (1, 0) | Lerner, Tranmer, Mowbray & Hâncean 2019 |
 | `HyperReceiverPopularity()` | past events received by the receivers |  |  |  |  | DHE_SUB_REPETITION_STAT (0, 1) | Lerner & Lomi 2023 |
 | `HyperReciprocation()` | past events from the receivers to the sender |  |  |  |  | DHE_SUB_REPETITION_STAT, dir IN | Lerner & Lomi 2023 |
 | `OutInPopularity()` | past events sent by the receivers |  |  |  |  |  | Lerner & Lomi 2023 |
@@ -199,7 +218,7 @@ replaces the clock by the event index, which is `clock=:order`.
 |---|---|---|---|---|---|---|---|
 | `memory=HalfLife(h)` | exponential decay |  | `memory = "decay"` | `halflife (normalized=true)` |  | attribute half-life | Brandes, Lerner & Snijders 2009 |
 | `memory=Window(w)` | sliding window |  | `memory = "window"` |  | `window` |  | de Nooy 2011; Quintane et al. 2013 |
-| `memory=Interval(a, b)` | one interval of the past |  | `memory = "interval"` |  |  |  | Perry & Wolfe 2013 |
+| `memory=IntervalMemory(a, b)` | one interval of the past |  | `memory = "interval"` |  |  |  | Perry & Wolfe 2013 |
 | `memory=PowerLaw(α)` | power-law decay |  |  |  |  |  | Vu, Lomi, Mascia & Pallotti 2017 |
 | `memory=LinearDecay(span)` | linear decay |  |  |  |  |  | Arena, Mulder & Leenders 2023 |
 | `clock=:order` | age measured in events |  |  |  |  |  | Malang, Brandenberger & Leifeld 2019 |
@@ -209,7 +228,7 @@ replaces the clock by the event index, which is `clock=:order`.
 
 | Revel | Measures | relevent | remstats | rem | goldfish | eventnet | Source |
 |---|---|---|---|---|---|---|---|
-| `Standardized(stat, n; corrected=true)` | z-score across the risk set |  | `scaling = "std"` |  |  |  | remstats |
+| `Standardized(stat, n; corrected=true)` | z-score across the risk set (with riskset=:full) |  | `scaling = "std"` |  |  |  | remstats |
 | `transform=:log1p` | log(1 + x) |  |  |  | `transformFun` | LOG1P function | Fritz, Rastelli, Fop & Caimo 2025 |
 
 <!-- catalogue:end -->
@@ -228,8 +247,11 @@ in the package README and CHANGELOG as well.
 | Sender-rate step of actor-oriented models; DyNAM-i group joining/leaving | goldfish | not implemented; the receiver-choice step is [`fit_receiver_choice`](@ref) |
 | Weibull/Gompertz baselines, integrated time-varying hazards | — | not implemented; the timing model is exponential with statistics constant between events |
 | Group-addressed participation shifts as a risk set | relevent | the statistics exist (`Relevent.PShift`); events "to the group" are not in Revel's dyadic risk sets |
-| Pairwise time-ordered transitivity (Arena, Mulder & Leenders 2022) | bremory | approximated by `OTP(ordered=true)` |
+| Pairwise time-ordered transitivity (Arena, Mulder & Leenders 2024) | bremory | approximated by `OTP(ordered=true)` |
 | Max-based turn-taking and turn-continuing (Juozaitienė & Wit 2024) | amorem | not implemented |
 | informR sequence statistics (S-forms) | informR | not implemented |
 | Bayesian estimation, penalisation, mixtures | remstimate, relevent | not implemented |
-| Two-mode hyperevents, generalised hyperevents, goodness of fit for hyperevent fits | eventnet | see [Relational hyperevents](hyperevents.md) |
+| Main effects of global covariates from time-shifted controls (Lembo, Juozaitienė, Vinciotti & Wit 2026) | — | not implemented; a [`GlobalEffect`](@ref) outside an [`Interaction`](@ref) is refused, because the ordinary partial likelihood does not identify it |
+| A `missing=` policy for covariates | — | not implemented; a `missing` covariate value is refused |
+| Internal times and decile statistics (Amati, Lomi & Snijders 2024); auxiliary-statistic score processes and their Cauchy combination (Boschi & Wit 2026); simulation of a held-out segment (Brandenberger 2019); a refitting simulation `gof` | — | not implemented; [`closing_times`](@ref), [`score_process_test`](@ref), [`prediction_summary`](@ref) and `gof` are the related tools, with the differences stated in their docstrings |
+| Two-mode and generalised hyperevents, geometric weighting, closure of order `(p, q, l)`, switch reciprocation, eventnet's four-cycle and neighbour statistics, time-varying hyperedge effects, the outcome model, Efron ties and a timing likelihood for hyperevents, goodness of fit for hyperevent fits | eventnet; the hyperevent papers | not implemented; see [Relational hyperevents](hyperevents.md) |

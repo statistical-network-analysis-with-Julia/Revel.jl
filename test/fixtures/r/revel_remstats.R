@@ -28,7 +28,9 @@ if (nzchar(Sys.getenv("R_LIBS_USER"))) .libPaths(c(Sys.getenv("R_LIBS_USER"), .l
 #   1<->4, 2<->4), closed triads among actors 1-4;
 # - actor 6 never sends; actor 5 is silent between t = 9.75 and t = 23.0;
 # - a numeric actor covariate `x`, a categorical one `g`, a dyadic matrix `d`,
-#   and (for the weighted run only) an event weight.
+#   and (for the weighted run only) an event weight;
+# - (for the typed_* keys only) an event type, "b" for every third event and
+#   "a" otherwise, and (for the event_* keys) an event attribute `z`.
 suppressMessages({library(remify); library(remstats)})
 
 n <- 6L
@@ -44,6 +46,8 @@ m <- nrow(ev)
 weight <- c(1.5, 0.5, 2, 1, 0.25, 3, 1, 0.75, 2.5, 1, 0.5, 1.25, 2, 1, 0.5, 1.75,
             1, 2.25, 0.5, 1, 3, 0.25, 1.5, 1, 2, 0.75, 1, 1.25, 0.5, 2, 1, 1.5,
             0.25, 1, 2.5, 0.5)
+type <- ifelse(seq_len(m) %% 3 == 0, "b", "a")   # event type (typed run only)
+z <- round(sin(seq_len(m)), 3)                    # event attribute (event() only)
 x <- c(1.5, -0.5, 2, 0, 3.25, 1)                  # numeric actor covariate
 g <- c("a", "b", "a", "c", "b", "a")              # categorical actor covariate
 d <- outer(seq_len(n), seq_len(n), function(i, j) (3 * i - j) / 8)   # dyadic
@@ -56,12 +60,15 @@ interval_hi    <- 5.0
 
 el  <- data.frame(time = ev[, 1], actor1 = as.integer(ev[, 2]), actor2 = as.integer(ev[, 3]))
 elw <- cbind(el, weight = weight)
+elt <- cbind(el, type = type)
 info <- data.frame(name = seq_len(n), time = 0, x = x, g = g)
 dimnames(d) <- list(seq_len(n), seq_len(n))
 
 reh  <- remify(el,  model = "tie", directed = TRUE,  ordinal = FALSE, actors = seq_len(n))
 rehu <- remify(el,  model = "tie", directed = FALSE, ordinal = FALSE, actors = seq_len(n))
 rehw <- remify(elw, model = "tie", directed = TRUE,  ordinal = FALSE, actors = seq_len(n))
+# event types on a dyadic risk set (extend_riskset_by_type = FALSE, the default)
+reht <- remify(elt, model = "tie", directed = TRUE,  ordinal = FALSE, actors = seq_len(n))
 # ordinal = TRUE: remify replaces the event times by the event index 1..M
 reho <- remify(el,  model = "tie", directed = TRUE,  ordinal = TRUE,  actors = seq_len(n))
 
@@ -108,7 +115,7 @@ cat(sprintf('r_version = "%s"\nremstats_version = "%s"\nremify_version = "%s"\n'
 cat('seed = 0 # deterministic; no random draws\n')
 cat('script = "test/fixtures/r/revel_remstats.R"\n')
 cat('date = "2026-09-30"\n')
-cat('dataset = "36 fixed directed events on a 0.25 time grid, 6 actors; actor 6 never sends, actor 5 silent for t in (9.75, 23); numeric and categorical actor covariates, a dyadic matrix, event weights for the weighted_* keys"\n')
+cat('dataset = "36 fixed directed events on a 0.25 time grid, 6 actors; actor 6 never sends, actor 5 silent for t in (9.75, 23); numeric and categorical actor covariates, a dyadic matrix, event weights for the weighted_* keys, event types for the typed_* keys, an event attribute z for the event_* keys"\n')
 cat('method = "remify::remify(model = \'tie\', ordinal = FALSE, riskset = \'full\') + remstats::remstats(first = 1): the full statistic array, event-major, dyads sender-major (directed) or i < j (undirected_* keys)"\n\n')
 cat('[tolerance]\n')
 cat('# Deterministic on both sides. Counts, ranks, minima, participation shifts and\n')
@@ -123,6 +130,8 @@ cat('# sample vs population sd), so it cannot hide one. Do not loosen it.\n')
 cat('default = 1e-10\n\n[values]\n')
 cat(sprintf('n_actors = %d\ninput_time = [%s]\ninput_sender = [%s]\ninput_receiver = [%s]\ninput_weight = [%s]\n',
             n, num(ev[, 1]), num(ev[, 2]), num(ev[, 3]), num(weight)))
+cat(sprintf('input_type = [%s]\nevent_z = [%s]\n', paste(sprintf('"%s"', type), collapse = ", "),
+            num(z)))
 cat(sprintf('covariate_x = [%s]\ncovariate_g = [%s]\n', num(x),
             paste(sprintf('"%s"', g), collapse = ", ")))
 cat(sprintf('# row-major: covariate_d[(s - 1) * n + r] is the value of dyad s -> r\ncovariate_d = [%s]\n',
@@ -177,10 +186,14 @@ emit(c("exo_send_x", "exo_receive_x", "exo_same_g", "exo_difference_x_abs",
 local({
   stats <- remstats(reh = reh, first = 1,
                     tie_effects = ~ inertia():send("x", attr_actors = info) +
-                      outdegreeSender():indegreeReceiver())
+                      outdegreeSender():indegreeReceiver() +
+                      send("x", attr_actors = info):receive("x", attr_actors = info) +
+                      event("z", event_attr = data.frame(z = z)):inertia())
   cols <- column_map(stats, TRUE)
   for (p in list(c("full_inertia_x_send_x", "inertia:send_x"),
-                 c("full_outdegreeSender_x_indegreeReceiver", "outdegreeSender:indegreeReceiver"))) {
+                 c("full_outdegreeSender_x_indegreeReceiver", "outdegreeSender:indegreeReceiver"),
+                 c("full_send_x_x_receive_x", "send_x:receive_x"),
+                 c("event_z_x_inertia", "inertia:event_z"))) {
     stopifnot(p[2] %in% dimnames(stats)[[3]])
     cat(sprintf("# remstats: %s\n%s = [%s]\n", p[2], p[1], num_array(as.vector(t(stats[, cols, p[2]])) + 0)))
   }
@@ -225,6 +238,12 @@ emit(c("weighted_inertia", "weighted_outdegreeSender", "weighted_indegreeReceive
        recencyContinue(), rehw)
 emit(c("weighted_decay_inertia", "weighted_decay_outdegreeSender"),
      ~ inertia() + outdegreeSender(), rehw, memory = "decay", memory_value = decay_halflife)
+
+# ---- event types: consider_type = "separate" (one statistic per past type) -------
+emit(c("typed_inertia_a", "typed_inertia_b", "typed_reciprocity_a", "typed_reciprocity_b",
+       "typed_otp_a", "typed_otp_b", "typed_outdegreeSender_a", "typed_outdegreeSender_b"),
+     ~ inertia(consider_type = "separate") + reciprocity(consider_type = "separate") +
+       otp(consider_type = "separate") + outdegreeSender(consider_type = "separate"), reht)
 
 # ---- ordinal = TRUE (the clock is the event index) -------------------------------
 emit(c("ordinal_window_inertia", "ordinal_window_otp", "ordinal_recencyContinue",

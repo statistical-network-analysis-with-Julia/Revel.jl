@@ -2,9 +2,8 @@
 # Interactions and statistic wrappers
 # =============================================================================
 #
-# The review found eight ways in which the literature lets a covariate moderate
-# an endogenous effect, three of them common, and stresses that they are NOT
-# interchangeable:
+# The literature lets a covariate moderate an endogenous effect in several ways,
+# and they are NOT interchangeable:
 #
 #   product term     Interaction(a, b)              — this file
 #   filtered         EventLayer(keep=…), MatchedDegree, matching_third
@@ -14,9 +13,10 @@
 #   time-varying     fit_moving_window, GlobalEffect × effect
 #   random slope / cross-level                       — not implemented
 #
-# The wrappers below work on ANY `AbstractStatistic` of the ecosystem — Revel's,
-# Relevent's (`PShift`, `CovSnd`, …) and REM's — because they only call the
-# shared `compute` generic.
+# The wrappers below only call the shared `compute` generic, so their parts may
+# be Revel's or Relevent's statistics (both evaluate on an InteractionHistory);
+# a REM statistic, which has only REM's interface, works in them through
+# `REM.fit_rem` but not through `fit_revel`.
 
 _part_name(s::AbstractStatistic) = name(s)
 
@@ -24,14 +24,16 @@ _part_name(s::AbstractStatistic) = name(s)
     Interaction(stats...; name=nothing)
 
 The product of two or more statistics: the explicit product-term interaction
-(remstats `a:b`; remulate `interact()`). The parts may be any statistics of the
-ecosystem, so `Interaction(Inertia(), SendEffect(x))` moderates an endogenous
-effect by a covariate and `Interaction(OutdegreeSender(), IndegreeReceiver())` is
-an endogenous × endogenous term.
+(remstats `a:b`; remulate `interact()`). `Interaction(Inertia(), SendEffect(x))`
+moderates an endogenous effect by a covariate and
+`Interaction(OutdegreeSender(), IndegreeReceiver())` is an endogenous ×
+endogenous term. The parts may be Revel's or Relevent's statistics (`PShift`,
+`CovSnd`, …); a REM.jl statistic has only REM's interface, so an interaction
+holding one works in `REM.fit_rem` but not in [`fit_revel`](@ref).
 
-The literature's guidance (review §"Guidance is thin but convergent"): include
-the main effects alongside the product, scale cumulative statistics before
-interacting them (see [`Standardized`](@ref) and the `transform=:log1p`
+The advice that recurs in the applied literature, though few papers state it:
+include the main effects alongside the product, scale cumulative statistics
+before interacting them (see [`Standardized`](@ref) and the `transform=:log1p`
 keyword), and centre a covariate first (see [`Transformed`](@ref)) so the main
 effects stay interpretable.
 
@@ -59,10 +61,14 @@ function Interaction(stats::AbstractStatistic...; name=nothing)
 end
 
 # The parts may be foreign statistics, whose methods want the history's own time
-# type: convert once here
+# type: convert once here (a fractional time on an integer clock is passed on
+# as it is; Revel's statistics accept any real time)
+_part_time(::Type{T}, t) where T = t isa T ? t :
+    (T <: Integer && t isa Real && !isinteger(t)) ? t : convert(T, t)
+
 function compute(stat::Interaction, history::InteractionHistory{T}, s::Int, r::Int,
                  t) where T
-    tt = convert(T, t)::T
+    tt = _part_time(T, t)
     return prod(map(p -> compute(p, history, s, r, tt), stat.parts))
 end
 compute(stat::Interaction, state::REM.EventNetworkState, s::Int, r::Int) =
@@ -107,7 +113,7 @@ end
 
 compute(stat::Transformed, history::InteractionHistory{T}, s::Int, r::Int,
         t) where T =
-    Float64(stat.f(compute(stat.stat, history, s, r, convert(T, t)::T)))
+    Float64(stat.f(compute(stat.stat, history, s, r, _part_time(T, t))))
 compute(stat::Transformed, state::REM.EventNetworkState, s::Int, r::Int) =
     Float64(stat.f(compute(stat.stat, state, s, r)))
 
@@ -120,30 +126,49 @@ mutable struct _StdCache
     t::Float64
     mean::Float64
     sd::Float64
+    values::Vector{Float64}
 end
+
+_StdCache() = _StdCache(WeakRef(nothing), -1, NaN, 0.0, 1.0, Float64[])
+
+# A copied statistic starts with an empty cache (see `_fresh`)
+Base.deepcopy_internal(::_StdCache, seen::IdDict) = _StdCache()
 
 """
     Standardized(stat, n_actors; directed=true, corrected=false, name=nothing)
+    Standardized(stat, dyads; corrected=false, name=nothing)
 
-`stat` z-scored across the risk set at every event time: its value minus the
-mean over all dyads among actors `1:n_actors`, divided by their standard
-deviation. A statistic that is constant across the risk set standardises to `0`.
+`stat` z-scored at every event time: its value minus the mean over a fixed set
+of dyads, divided by their standard deviation. The set is every dyad among
+actors `1:n_actors` (unordered pairs with `directed=false`), or the explicit
+vector `dyads` of `(sender, receiver)` — a two-mode risk set, say. A statistic
+that is constant across the set standardises to `0`.
+
+The set must be the model's risk set, and the fitters check it: `riskset=:full`
+with the same `n_actors` and `directed`, or `riskset=dyads` with the same dyads.
+Risk sets that change from event to event (`:active` is fixed, but `:sender`,
+`:receiver` and function risk sets are not) are refused, because remstats'
+`scaling = "std"` — the construction this reproduces — standardises over the
+risk set of each event.
 
 `corrected=false` divides by the population standard deviation (denominator
 `D`, the number of dyads); `corrected=true` by the sample one (denominator
-`D − 1`), which is what remstats' `scaling = "std"` computes. The two differ by
-the constant factor `sqrt((D − 1)/D)`, so they rescale the coefficient and
-nothing else.
+`D − 1`), which is what remstats computes. The two differ by the constant factor
+`sqrt((D − 1)/D)`, so they rescale the coefficient and nothing else.
 
 Cumulative statistics grow without bound over an event sequence, which makes
 their coefficients hard to compare across effects and can set off a feedback
 loop in simulation ("process explosion"); per-time-point standardisation is one
-of the two remedies in the literature (Vieira, Leenders & Mulder), the other
-being a `log1p` transform.
+remedy in the literature (Vieira, Leenders & Mulder 2024), a `log1p` transform
+another. It is **a different model, not a rescaling**: the mean cancels within a
+risk set but the standard deviation `σ_t` does not, so a coefficient `θ` on the
+standardised statistic is an effect of `θ/σ_t` per raw unit, which shrinks as
+the history accumulates and `σ_t` grows. Fitting `Standardized(Inertia(), n)`
+to data generated by a constant raw inertia effect therefore misfits, and the
+score-process test detects it.
 
-`directed=false` standardises over unordered pairs. The mean and standard
-deviation are computed once per event time, so the wrapper costs one extra pass
-over the risk set.
+The moments are computed once per event time, from one extra evaluation of
+every dyad of the set.
 
 # Example
 ```julia
@@ -152,12 +177,15 @@ h = build_history([Event(1, 2, 1.0), Event(1, 2, 2.0)])
 z = Standardized(Inertia(), 3)
 compute(z, h, 1, 2, 3.0)    # ≈ 2.24 — the only dyad with a history
 compute(z, h, 2, 3, 3.0)    # ≈ -0.45
+two_mode = Standardized(Inertia(), two_mode_dyads(1:2, 3:4))
+compute(two_mode, h, 1, 3, 3.0)   # 0.0 — no dyad of the set has a history
 ```
 """
 struct Standardized{S<:AbstractStatistic} <: AbstractRevelStatistic
     stat::S
     n_actors::Int
     directed::Bool
+    dyads::Union{Nothing, Vector{Tuple{Int,Int}}}
     corrected::Bool
     cache::_StdCache
     label::String
@@ -167,41 +195,54 @@ function Standardized(stat::AbstractStatistic, n_actors::Int; directed::Bool=tru
                       corrected::Bool=false, name=nothing)
     n_actors >= (corrected && !directed ? 3 : 2) || throw(ArgumentError(
         "Standardized needs at least two dyads in the risk set"))
-    return Standardized{typeof(stat)}(stat, n_actors, directed, corrected,
-                                      _StdCache(WeakRef(nothing), -1, NaN, 0.0, 1.0),
+    return Standardized{typeof(stat)}(stat, n_actors, directed, nothing, corrected,
+                                      _StdCache(),
                                       _label(name, "std(" * Revel.name(stat) * ")"))
 end
 
-# Mean and standard deviation of `value(i, j)` over the risk set
-function _risk_set_moments(value, n::Int, directed::Bool, corrected::Bool)
-    total = 0.0; count = 0
-    for i in 1:n, j in (directed ? (1:n) : ((i + 1):n))
-        i == j && continue
-        total += value(i, j); count += 1
+function Standardized(stat::AbstractStatistic, dyads::AbstractVector; corrected::Bool=false,
+                      name=nothing)
+    set = [(Int(s), Int(r)) for (s, r) in dyads]
+    length(set) >= (corrected ? 3 : 2) || throw(ArgumentError(
+        "Standardized needs at least two dyads in the risk set"))
+    allunique(set) || throw(ArgumentError("the dyads of Standardized list a dyad twice"))
+    return Standardized{typeof(stat)}(stat, 0, true, set, corrected, _StdCache(),
+                                      _label(name, "std(" * Revel.name(stat) * ")"))
+end
+
+function _each_std_dyad(f, stat::Standardized)
+    if stat.dyads === nothing
+        n = stat.n_actors
+        for i in 1:n, j in (stat.directed ? (1:n) : ((i + 1):n))
+            i == j || f(i, j)
+        end
+    else
+        for (i, j) in stat.dyads
+            f(i, j)
+        end
     end
-    μ = total / count
-    # a second pass on the deviations: no cancellation for a near-constant statistic
-    ss = 0.0
-    for i in 1:n, j in (directed ? (1:n) : ((i + 1):n))
-        i == j && continue
-        ss += (value(i, j) - μ)^2
-    end
-    return μ, sqrt(ss / (corrected ? count - 1 : count))
+    return nothing
 end
 
 function _standardize(stat::Standardized, source, len::Int, t::Float64, value, s::Int,
                       r::Int)
     c = stat.cache
     if c.source.value !== source || c.len != len || c.t != t
-        μ, σ = _risk_set_moments(value, stat.n_actors, stat.directed, stat.corrected)
-        c.source = WeakRef(source); c.len = len; c.t = t; c.mean = μ; c.sd = σ
+        vals = c.values
+        empty!(vals)
+        _each_std_dyad((i, j) -> push!(vals, value(i, j)), stat)
+        μ = sum(vals) / length(vals)
+        # two passes over the stored values: no cancellation for a near-constant statistic
+        ss = sum(v -> (v - μ)^2, vals)
+        c.source = WeakRef(source); c.len = len; c.t = t; c.mean = μ
+        c.sd = sqrt(ss / (stat.corrected ? length(vals) - 1 : length(vals)))
     end
     return c.sd > 0 ? (value(s, r) - c.mean) / c.sd : 0.0
 end
 
 function compute(stat::Standardized, history::InteractionHistory{T}, s::Int, r::Int,
                  t) where T
-    tt = convert(T, t)::T
+    tt = _part_time(T, t)
     return _standardize(stat, history.events, length(history.events), _tfloat(tt),
                         (i, j) -> compute(stat.stat, history, i, j, tt), s, r)
 end
@@ -211,6 +252,53 @@ compute(stat::Standardized, state::REM.EventNetworkState, s::Int, r::Int) =
 
 _uses_history(stat::Standardized) = REM.needs_history(stat.stat)
 _interval_constant(stat::Standardized) = Relevent.is_interval_constant(stat.stat)
+
+# The statistics a wrapper is built from
+_parts(stat::Interaction) = stat.parts
+_parts(stat::Transformed) = (stat.stat,)
+_parts(stat::Standardized) = (stat.stat,)
+_parts(::Any) = ()
+
+function _foreach_part(f, stat)
+    f(stat)
+    foreach(p -> _foreach_part(f, p), _parts(stat))
+    return nothing
+end
+
+# A Standardized statistic must standardise over the model's risk set
+function _check_standardized(statistics, riskset, n_actors::Int, directed::Bool)
+    for top in statistics
+        _foreach_part(top) do stat
+            stat isa Standardized || return
+            where_ = "$(name(stat)) standardises over "
+            if riskset === :full
+                stat.dyads === nothing && stat.n_actors == n_actors &&
+                    stat.directed == directed && return
+                throw(ArgumentError(where_ *
+                    (stat.dyads === nothing ?
+                     "the $(stat.directed ? "" : "un")directed dyads among 1:$(stat.n_actors)" :
+                     "an explicit list of $(length(stat.dyads)) dyads") *
+                    ", but the model's risk set is every $(directed ? "" : "un")directed " *
+                    "dyad among 1:$n_actors. Build it as `Standardized(stat, $n_actors" *
+                    (directed ? "" : "; directed=false") * ")`."))
+            elseif riskset isa AbstractVector
+                set = Set((Int(a), Int(b)) for (a, b) in riskset)
+                stat.dyads !== nothing && Set(stat.dyads) == set && return
+                throw(ArgumentError(where_ * "a different set of dyads than the " *
+                    "model's risk set; build it as `Standardized(stat, riskset)` with " *
+                    "the same dyads."))
+            else
+                throw(ArgumentError(where_ * "a fixed set of dyads, but " *
+                    "riskset=$(repr(riskset)) " *
+                    (riskset === :active ? "is the set of dyads active in the sequence; " *
+                     "pass that set explicitly, as a vector, to both" :
+                     "changes from event to event") *
+                    ". Standardized is available with riskset=:full or a vector of dyads."))
+            end
+        end
+    end
+    return nothing
+end
 
 """
     split_by_type(constructor, types; kwargs...) -> Vector
@@ -238,4 +326,4 @@ h = build_history([Event(2, 1, 1.0; eventtype=:praise)])
 ```
 """
 split_by_type(constructor, types; kwargs...) =
-    [constructor(; types=ty, kwargs...) for ty in types]
+    [constructor(; types=ty, kwargs...) for ty in (types isa Symbol ? (types,) : types)]

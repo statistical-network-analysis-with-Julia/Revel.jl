@@ -3,8 +3,7 @@
 # =============================================================================
 #
 # How much a past event still counts is a modelling dimension of its own in the
-# REM literature (review §"Memory became a modelling dimension of its own"):
-# full accumulated history (Butts 2008), exponential half-life decay (Brandes,
+# REM literature: full accumulated history (Butts 2008), exponential half-life decay (Brandes,
 # Lerner & Snijders 2009), sliding windows (de Nooy 2011; Quintane et al. 2013),
 # an interval partition of the past (Perry & Wolfe 2013), power-law decay (Vu et
 # al. 2017) and linear decay (Arena, Mulder & Leenders 2023). Every endogenous
@@ -17,7 +16,7 @@
 Supertype of the memory kernels: a rule giving the weight `kernel_weight(m, age)`
 a past event of age `age ≥ 0` carries in an endogenous statistic. The concrete
 kernels are [`FullMemory`](@ref), [`HalfLife`](@ref), [`Window`](@ref),
-[`Interval`](@ref), [`PowerLaw`](@ref), [`LinearDecay`](@ref) and
+[`IntervalMemory`](@ref), [`PowerLaw`](@ref), [`LinearDecay`](@ref) and
 [`KernelMemory`](@ref).
 
 # Example
@@ -102,32 +101,33 @@ struct Window <: AbstractMemory
 end
 
 """
-    Interval(lo, hi) <: AbstractMemory
+    IntervalMemory(lo, hi) <: AbstractMemory
 
 Events whose age lies in `(lo, hi]` count with weight 1 (Perry & Wolfe 2013;
 remstats `memory = "interval"`). A set of adjacent intervals partitions the past,
 and giving each its own coefficient estimates the decay *shape* rather than
-assuming it — see [`interval_partition`](@ref).
+assuming it — see [`interval_partition`](@ref). (It is not called `Interval`
+so that it does not clash with `IntervalSets.Interval`.)
 
 # Example
 ```julia
 using Revel
-kernel_weight(Interval(1.0, 7.0), 1.0)   # 0.0 — the lower bound is open
-kernel_weight(Interval(1.0, 7.0), 7.0)   # 1.0
+kernel_weight(IntervalMemory(1.0, 7.0), 1.0)   # 0.0 — the lower bound is open
+kernel_weight(IntervalMemory(1.0, 7.0), 7.0)   # 1.0
 ```
 """
-struct Interval <: AbstractMemory
+struct IntervalMemory <: AbstractMemory
     lo::Float64
     hi::Float64
-    function Interval(lo::Real, hi::Real)
+    function IntervalMemory(lo::Real, hi::Real)
         0 <= lo < hi || throw(ArgumentError(
-            "an Interval needs 0 <= lo < hi, got ($lo, $hi)"))
+            "an IntervalMemory needs 0 <= lo < hi, got ($lo, $hi)"))
         new(Float64(lo), Float64(hi))
     end
 end
 
 """
-    PowerLaw(exponent; offset=0.0) <: AbstractMemory
+    PowerLaw(exponent; offset=0.0, support=Inf) <: AbstractMemory
 
 Power-law decay: an event of age `a` weighs `(a + offset)^(-exponent)` (the
 Lomi/Vu line: Vu, Lomi, Mascia & Pallotti 2017; Bianchi & Lomi 2023, with the
@@ -136,28 +136,39 @@ exponent chosen by grid search — see [`profile_memory`](@ref)). With
 tied with the one being explained under `ties=:ordered`; pass a positive
 `offset` for such data.
 
+A power law never reaches zero, so every new clock re-reads the whole history:
+a sequence of `E` events costs `O(E²)`. `support` truncates the kernel — an
+event older than `support` weighs 0 — which bounds that cost by the events
+inside it; choose it where the weights have become negligible.
+
 # Example
 ```julia
 using Revel
-kernel_weight(PowerLaw(1.0), 4.0)               # 0.25
-kernel_weight(PowerLaw(0.5; offset=1.0), 0.0)   # 1.0
+kernel_weight(PowerLaw(1.0), 4.0)                      # 0.25
+kernel_weight(PowerLaw(0.5; offset=1.0), 0.0)          # 1.0
+kernel_weight(PowerLaw(1.0; support=100.0), 200.0)     # 0.0
 ```
 """
 struct PowerLaw <: AbstractMemory
     exponent::Float64
     offset::Float64
-    function PowerLaw(exponent::Real; offset::Real=0.0)
+    support::Float64
+    function PowerLaw(exponent::Real; offset::Real=0.0, support::Real=Inf)
         exponent > 0 || throw(ArgumentError("exponent must be positive, got $exponent"))
         offset >= 0 || throw(ArgumentError("offset must be non-negative, got $offset"))
-        new(Float64(exponent), Float64(offset))
+        support > 0 || throw(ArgumentError("support must be positive, got $support"))
+        new(Float64(exponent), Float64(offset), Float64(support))
     end
 end
 
 """
     LinearDecay(span) <: AbstractMemory
 
-Linear decay: an event of age `a` weighs `max(0, 1 - a/span)` (one of the
-parametric decays compared by Arena, Mulder & Leenders 2023).
+Linear decay: an event of age `a` weighs `max(0, 1 - a/span)` — the linear
+decay of Arena, Mulder & Leenders (2023, eq. 8), whose parameter is the
+half-life, the age at which the weight is 1/2: `span` is twice their θ. A
+profile over `span` and one over their half-life are the same profile on
+different scales.
 
 # Example
 ```julia
@@ -207,7 +218,7 @@ clock is `:order`) carries under `memory`.
 ```julia
 using Revel
 kernel_weight(HalfLife(2.0), 4.0)        # 0.25
-kernel_weight(Interval(0.0, 1.0), 0.5)   # 1.0
+kernel_weight(IntervalMemory(0.0, 1.0), 0.5)   # 1.0
 ```
 """
 kernel_weight(::FullMemory, age::Real) = 1.0
@@ -216,8 +227,9 @@ function kernel_weight(m::HalfLife, age::Real)
     return m.normalized ? w * log(2) / m.halflife : w
 end
 kernel_weight(m::Window, age::Real) = age <= m.width ? 1.0 : 0.0
-kernel_weight(m::Interval, age::Real) = (m.lo < age <= m.hi) ? 1.0 : 0.0
+kernel_weight(m::IntervalMemory, age::Real) = (m.lo < age <= m.hi) ? 1.0 : 0.0
 function kernel_weight(m::PowerLaw, age::Real)
+    age > m.support && return 0.0
     base = age + m.offset
     base > 0 || throw(ArgumentError(
         "PowerLaw memory is undefined for an event of age 0 (a past event tied " *
@@ -231,9 +243,10 @@ kernel_weight(m::KernelMemory, age::Real) = Float64(m.f(age))
 # The age beyond which an event contributes nothing (the history scan stops there)
 _support(::AbstractMemory) = Inf
 _support(m::Window) = m.width
-_support(m::Interval) = m.hi
+_support(m::IntervalMemory) = m.hi
 _support(m::LinearDecay) = m.span
 _support(m::KernelMemory) = m.support
+_support(m::PowerLaw) = m.support
 
 # Accumulating kernels are absorbed once per event into running totals; every
 # other kernel is re-read off the retained event list when the clock moves.
@@ -247,21 +260,26 @@ _memory_interval_constant(::AbstractMemory) = false
 _memory_interval_constant(::FullMemory) = true
 _memory_interval_constant(m::HalfLife) = !isfinite(m.halflife)
 
+# … and under this layer: on the event clock (`clock=:order`) every kernel's
+# ages change only when an event happens
+_layer_interval_constant(L) = L.clock === :order || _memory_interval_constant(L.memory)
+
 _memory_label(::FullMemory) = ""
 _memory_label(m::HalfLife) = "halflife=$(m.halflife)" * (m.normalized ? ",normalized" : "")
 _memory_label(m::Window) = "window=$(m.width)"
-_memory_label(m::Interval) = "interval=($(m.lo),$(m.hi)]"
-_memory_label(m::PowerLaw) = "powerlaw=$(m.exponent)"
+_memory_label(m::IntervalMemory) = "interval=($(m.lo),$(m.hi)]"
+_memory_label(m::PowerLaw) = "powerlaw=$(m.exponent)" *
+                             (isfinite(m.support) ? ",support=$(m.support)" : "")
 _memory_label(m::LinearDecay) = "linear=$(m.span)"
 _memory_label(::KernelMemory) = "kernel"
 
 """
-    interval_partition(breaks) -> Vector{Interval}
+    interval_partition(breaks) -> Vector{IntervalMemory}
 
-The adjacent [`Interval`](@ref) kernels `(b₁, b₂], (b₂, b₃], …` cut by the
+The adjacent [`IntervalMemory`](@ref) kernels `(b₁, b₂], (b₂, b₃], …` cut by the
 increasing `breaks`. Fitting one copy of an effect per interval gives the
 piecewise-constant decay profile of Perry & Wolfe (2013), who used seven
-intervals, and the stepwise interval effects of Arena, Mulder & Leenders (2022).
+intervals, and the stepwise interval effects of Arena, Mulder & Leenders (2024).
 
 # Example
 ```julia
@@ -274,5 +292,5 @@ length(parts)                                  # 3
 function interval_partition(breaks::AbstractVector{<:Real})
     length(breaks) >= 2 || throw(ArgumentError("need at least two break points"))
     issorted(breaks; lt=<=) || throw(ArgumentError("breaks must be strictly increasing"))
-    return [Interval(breaks[k], breaks[k + 1]) for k in 1:(length(breaks) - 1)]
+    return [IntervalMemory(breaks[k], breaks[k + 1]) for k in 1:(length(breaks) - 1)]
 end

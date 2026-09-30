@@ -6,7 +6,7 @@ that network is an [`EventLayer`](@ref), and it is independent of what the
 effect then does with it. This is the part of a specification that differs most
 between papers and between packages, and the part most often left implicit.
 
-```julia
+```@example layers
 using Revel
 
 events = [Event(1, 2, 0.0), Event(1, 2, 6.0), Event(2, 1, 9.0), Event(1, 3, 10.0)]
@@ -24,29 +24,29 @@ devices in the literature:
 | [`FullMemory`](@ref)`()` | `1` | Butts 2008 |
 | [`HalfLife`](@ref)`(h)` | `exp(-a·ln2/h)` | Brandes, Lerner & Snijders 2009 |
 | [`Window`](@ref)`(w)` | `1` if `a ≤ w` | de Nooy 2011; Quintane et al. 2013 |
-| [`Interval`](@ref)`(lo, hi)` | `1` if `lo < a ≤ hi` | Perry & Wolfe 2013 |
+| [`IntervalMemory`](@ref)`(lo, hi)` | `1` if `lo < a ≤ hi` | Perry & Wolfe 2013 |
 | [`PowerLaw`](@ref)`(α)` | `a^(-α)` | Vu, Lomi, Mascia & Pallotti 2017 |
-| [`LinearDecay`](@ref)`(s)` | `max(0, 1 − a/s)` | Arena, Mulder & Leenders 2023 |
+| [`LinearDecay`](@ref)`(s)` | `max(0, 1 − a/s)` | Arena, Mulder & Leenders 2023 (whose half-life is `s/2`) |
 
 and [`KernelMemory`](@ref) takes any function of the age.
 
-```julia
+```@example layers
 compute(Inertia(), history, 1, 2, t)                          # 2.0
 compute(Inertia(memory=HalfLife(6.0)), history, 1, 2, t)      # 0.25 + 0.5
 compute(Inertia(memory=Window(6.0)), history, 1, 2, t)        # 1.0 — age 6 still counts
-compute(Inertia(memory=Interval(6.0, 12.0)), history, 1, 2, t)  # 1.0 — only the first
+compute(Inertia(memory=IntervalMemory(6.0, 12.0)), history, 1, 2, t)  # 1.0 — only the first
 compute(Inertia(memory=LinearDecay(12.0)), history, 1, 2, t)  # 0.0 + 0.5
 ```
 
-Three conventions are worth knowing, because a fixture generated under one does
-not validate the other:
+Three conventions are worth knowing, because the same coefficient means
+different things under each:
 
 - **Two normalisations of the exponential kernel coexist.** `HalfLife(h)` is the
   plain weight (Lerner & Lomi 2020; Arena et al. 2023; remstats).
   `HalfLife(h; normalized=true)` multiplies it by `ln2/h` (Brandes et al. 2009;
   the rem package). They rescale the coefficient by a constant.
 - **A window is closed, an interval half-open.** An event exactly `w` old is
-  inside `Window(w)`; `Interval(lo, hi)` excludes `lo` and includes `hi`, so
+  inside `Window(w)`; `IntervalMemory(lo, hi)` excludes `lo` and includes `hi`, so
   adjacent intervals partition the past.
 - **The decay is evaluated at the time of the event being explained.** remstats
   4.1.0 evaluates it at the time of the *previous* event, contrary to its
@@ -59,7 +59,7 @@ estimate can move from zero to above one across plausible values.
 [`interval_partition`](@ref) gives the piecewise-constant decay profile of Perry
 & Wolfe — one copy of an effect per interval, each with its own coefficient:
 
-```julia
+```@example layers
 profile = [Inertia(memory=m) for m in interval_partition([0.0, 1.0, 24.0, 168.0])]
 name.(profile)
 ```
@@ -69,7 +69,7 @@ parameter (see [Fitting](fitting.md)).
 
 ## Which events count
 
-```julia
+```@example layers
 typed = [Event(1, 2, 1.0; eventtype=:praise), Event(1, 2, 2.0; eventtype=:blame, weight=3.0)]
 h2 = build_history(typed)
 
@@ -90,7 +90,7 @@ compute(Inertia(keep=(s, r, t, w, ty) -> w > 2, name="heavy"), h2, 1, 2, 3.0)   
 recent event is one event old. Use it for order-only data, and for a half-life
 stated in events.
 
-```julia
+```@example layers
 compute(Inertia(memory=HalfLife(2.0), clock=:order), history, 1, 2, t)   # 0.5^2 + 0.5^1.5
 ```
 
@@ -100,29 +100,39 @@ compute(Inertia(memory=HalfLife(2.0), clock=:order), history, 1, 2, t)   # 0.5^2
 layer is an undirected weighted network. On such a layer an actor's out-, in-
 and total degree are the same number: the events it took part in.
 
-```julia
+```@example layers
 compute(Inertia(symmetric=true), history, 2, 1, t)             # 3.0
 compute(TotaldegreeSender(symmetric=true), history, 3, 1, t)   # 1.0
 ```
 
 ## Sharing a layer
 
-Each constructor builds a private layer from its keywords. To make several
-effects read one index of the history — less memory, one pass — build the layer
-once and pass it:
+Each constructor builds a private layer from its keywords. The fitters, the
+design functions and the diagnostics work on copies of the statistics, and the
+copies merge layers with the same keywords, so `[Inertia(), Reciprocation(),
+OTP()]` read one index of the history. A layer can also be shared explicitly:
 
-```julia
+```@example layers
 recent = EventLayer(memory=HalfLife(30.0))
 stats = [Inertia(layer=recent), Reciprocation(layer=recent), OTP(layer=recent)]
 ```
 
-A layer is a mutable cache of the history it was last evaluated on. Do not share
-one layer, or one statistic, between tasks that fit concurrently.
+A layer caches the histories it has been evaluated on. Because the entry points
+work on copies, one specification can be fitted from several tasks at once;
+calling `compute` by hand on one statistic from several tasks concurrently is
+not safe.
 
 ## Cost
 
 [`FullMemory`](@ref) and [`HalfLife`](@ref) are accumulated: each event is
 absorbed once and every read is `O(1)`. The other kernels are re-read off the
 retained events whenever the clock moves, walking back only as far as the
-kernel's support — a window costs the events inside it. Storage is dense in the
-number of actors (a few `n × n` matrices per layer).
+kernel's support — a window costs the events inside it, but a kernel without a
+finite support ([`PowerLaw`](@ref) or [`KernelMemory`](@ref) without `support`)
+re-reads the whole history at every new clock, so a sequence of `E` events
+costs `O(E²)`; give the kernel a `support` where the weights become negligible.
+
+Storage grows with the number of dyads that have a history, not with the square
+of the largest actor ID: a layer keeps its per-dyad values in vectors, found
+through a dense index (with dense copies of the weights, for speed) while actor
+IDs stay below 2,048, and through a hash map beyond.

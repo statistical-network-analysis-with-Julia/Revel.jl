@@ -8,7 +8,7 @@
 # Tranmer, Mowbray & Hâncean 2019; Lerner, Lomi, Mowbray, Rollings & Tranmer
 # 2021; Lerner & Lomi 2023) put the event rate on the hyperedge instead of on
 # the dyad, and replace dyadic statistics by hyperedge statistics built in two
-# steps (review §"Hyperevents"): aggregate past events into a hyperedge
+# steps: aggregate past events into a hyperedge
 # attribute — *activity* (events on exactly h) or *degree* (events on any
 # superset of h) — then aggregate that attribute over the sub-hyperedges of a
 # given order. The vocabulary is an algebra rather than a list:
@@ -539,6 +539,16 @@ end
 # walk runs backwards and stops at the kernel's support; events later than `t`
 # have not happened yet.
 function _read_list(h::HyperHistory, list::Vector{Int}, rd::_HyperRead, t::Float64)
+    if rd.memory isa FullMemory && rd.types === nothing && !rd.weighted
+        # every listed event up to `t` counts 1: bisect for how many there are,
+        # so a read costs O(log events) however long the list
+        lo, hi = 0, length(list)
+        @inbounds while lo < hi
+            mid = (lo + hi + 1) >>> 1
+            h.times[list[mid]] <= t ? (lo = mid) : (hi = mid - 1)
+        end
+        return Float64(lo)
+    end
     total = 0.0
     sup = _support(rd.memory)
     @inbounds for k in length(list):-1:1
@@ -588,6 +598,14 @@ function _aggregate(v::Vector{Float64}, how::Symbol)
         end
         return sqrt(ss / (how === :sd ? n : n - 1))
     end
+    if how === :homogeneity
+        # Lerner et al. (2021, pp. 228–229), for a binary covariate: the larger
+        # group minus the smaller, over the size; for an odd size rescaled so
+        # that the most even split is 0 and a single group is 1
+        k = count(==(1.0), v)
+        d = abs(n - 2k) / n
+        return isodd(n) ? (n == 1 ? 1.0 : (d - 1 / n) / (1 - 1 / n)) : d
+    end
     n == 1 && return 0.0
     pairs = n * (n - 1) / 2
     how === :absdiff && return _pairwise(v, false) / pairs
@@ -595,7 +613,8 @@ function _aggregate(v::Vector{Float64}, how::Symbol)
     return -_pairwise(v, false)             # :assortativity
 end
 
-const _SUBSET_AGGREGATES = (:mean, :sum, :min, :max, :sd, :absdiff, :assortativity)
+const _SUBSET_AGGREGATES = (:mean, :sum, :min, :max, :sd, :samplesd, :absdiff,
+                            :assortativity)
 
 function _check_aggregate(aggregate::Symbol, allowed, what::AbstractString)
     aggregate in (:gw, :gwsr, :geometric) && throw(ArgumentError(
@@ -699,8 +718,10 @@ keyword:
 - `:sum` — the unnormalised `subrep⁽ᵏ⁾` of Lerner, Hâncean & Perc (2025),
   preferential attachment of order k.
 - `:min`, `:max`, `:sd` (population standard deviation) — the other aggregators
-  the 2019 paper allows; `:absdiff` — the mean absolute difference over pairs of
-  subsets (eventnet `ABSDIFF`).
+  the 2019 paper allows; `:samplesd` — the sample standard deviation, which with
+  `p = 1` and `weighted=true` is the *prior success disparity* of Lerner &
+  Hâncean (2023, p. 17); `:absdiff` — the mean absolute difference over pairs
+  of subsets (eventnet `ABSDIFF`).
 - `:assortativity` — `−Σ |deg(h′) − deg(h″)|` over unordered pairs of
   `p`-subsets: the degree assortativity of order k of Lerner, Hâncean & Perc
   (2025), zero unless the candidate has more than `p` participants.
@@ -945,11 +966,9 @@ This is a ratio of an outcome-weighted to an unweighted subset repetition; the
 outcome-weighted hyperedge degree alone is
 `SubsetRepetition(p; weighted=true, aggregate=:sum)`.
 
-The paper's *prior success disparity* (the standard deviation of the members'
-individual performance) is not provided as a named statistic: the notes do not
-fix whether "individual performance" is the summed or the average outcome.
-`SubsetRepetition(1; weighted=true, aggregate=:sd)` is the summed-outcome
-reading.
+The paper's *prior success disparity* — the sample standard deviation of the
+members' summed past performance (Lerner & Hâncean 2023, p. 17) — is
+`SubsetRepetition(1; weighted=true, aggregate=:samplesd)`.
 
 # Example
 ```julia
@@ -1014,16 +1033,17 @@ the candidate `(a, b)` that `direction` selects:
   `p` of the candidate's receivers as past senders and `q` of its senders as
   past receivers.
 - `:sym` — undirected subset repetition: roles are ignored, and the statistic is
-  [`SubsetRepetition`](@ref) of order `p + q` on the participant sets. (The
-  notes record that eventnet's `SYM` means "undirected subset repetition" but
-  not how a `(p, q)` order maps onto it; this is the reading implemented.)
+  [`SubsetRepetition`](@ref) of order `p + q` on the participant sets. (eventnet
+  documents `SYM` as "undirected subset repetition" without saying how a
+  `(p, q)` order maps onto it; this is the reading implemented.)
 
 `aggregate` is as in [`SubsetRepetition`](@ref): `:mean` (default, the 2019 and
 2023 papers), `:sum`, `:min`, `:max`, `:sd`, `:absdiff`, `:assortativity`. A
 candidate with fewer than `p` senders or `q` receivers (as the direction
 requires) scores 0.
 
-The named effects of Lerner & Lomi (2023) are thin constructors:
+The named effects of the papers (Lerner, Tranmer, Mowbray & Hâncean 2019;
+Lerner & Lomi 2023) are thin constructors:
 
 | constructor | order, direction |
 |---|---|
@@ -1355,7 +1375,7 @@ and `HyperClosure(kind)` sets the two directions.
 `normalize` records a drift between the papers: the 2019 preprint divides
 closure by the number of possible third actors, the papers from 2021 onward do
 not. `:none` (default) follows the later papers; `:thirds` also divides by
-`n_actors − 2` and needs `n_actors=`. (The notes do not say whether the 2019
+`n_actors − 2` and needs `n_actors=`. (The preprint does not say whether its
 count excludes the other members of the candidate; `n_actors − 2`, every actor
 but the pair, is the reading implemented. With a fixed actor set it rescales the
 coefficient by a constant.)
@@ -1501,7 +1521,8 @@ end
 # Covariates on a hyperedge
 # -----------------------------------------------------------------------------
 
-const _COVARIATE_AGGREGATES = (:mean, :sum, :min, :max, :sd, :samplesd, :absdiff, :catdiff)
+const _COVARIATE_AGGREGATES = (:mean, :sum, :min, :max, :sd, :samplesd, :absdiff, :catdiff,
+                               :homogeneity)
 
 """
     HyperCovariate(x; endpoint=:all, aggregate=:mean, transform=identity,
@@ -1515,9 +1536,12 @@ A summary of an actor covariate over the candidate hyperedge (eventnet
   or the `:receivers` (an undirected hyperedge has `:all` only).
 - `aggregate` — `:mean`, `:sum`, `:min`, `:max`, `:sd` (population standard
   deviation; eventnet `SDEV`), `:samplesd` (`SAMPLESDEV`), `:absdiff` (the mean
-  absolute difference over pairs) or `:catdiff` (the share of pairs with
+  absolute difference over pairs), `:catdiff` (the share of pairs with
   different values, for a categorical covariate — the only aggregate a
-  categorical covariate accepts).
+  categorical covariate accepts) or `:homogeneity` (for a 0/1 covariate: the
+  covariate homogeneity of Lerner et al. 2021 — the larger group minus the
+  smaller, over the size, rescaled for an odd size so that the most even split
+  scores 0 and a single group 1).
 
 Pairs for `:absdiff` and `:catdiff` are the unordered pairs within the chosen
 endpoint — except with `endpoint=:all` on a directed hyperedge, where, as in
@@ -1529,7 +1553,8 @@ The covariate effects of the papers are special cases:
 | effect | arguments |
 |---|---|
 | covariate average (Lerner et al. 2021) | `aggregate=:mean` |
-| covariate homogeneity / heterophily (2021) | `aggregate=:absdiff` (or `:sd`) |
+| covariate homogeneity of a binary covariate (Lerner et al. 2021) | `aggregate=:homogeneity` |
+| covariate dispersion within the hyperedge | `aggregate=:absdiff`, `:sd` or `:samplesd` |
 | receiver-set average (Lerner & Lomi 2023) | `endpoint=:receivers, aggregate=:mean` |
 | sender–receiver heterophily (2023), mean `abs(zᵢ − zⱼ)` | `endpoint=:all, aggregate=:absdiff` on directed hyperedges |
 | receiver-set heterophily (2023), mean pairwise difference within `J` | `endpoint=:receivers, aggregate=:absdiff` |
@@ -1550,6 +1575,9 @@ compute(HyperCovariate(age; endpoint=:receivers), h, [1], [2, 4], 0.0)        # 
 compute(HyperCovariate(age; aggregate=:absdiff), h, [1], [2, 4], 0.0)         # (10 + 10)/2
 dept = Covariate([:a, :a, :b, :b]; name="dept")
 compute(HyperCovariate(dept; aggregate=:catdiff), h, [1, 2, 3], Int[], 0.0)   # 2/3
+female = [1.0, 0.0, 1.0, 1.0]
+compute(HyperCovariate(female; aggregate=:homogeneity), h, [1, 2, 3, 4], Int[], 0.0)   # (3 − 1)/4 = 0.5
+compute(HyperCovariate(female; aggregate=:homogeneity), h, [1, 3, 4], Int[], 0.0)      # 1.0 — one group
 ```
 """
 struct HyperCovariate{F} <: AbstractHyperStatistic
@@ -1568,6 +1596,9 @@ function HyperCovariate(x; endpoint::Symbol=:all, aggregate::Symbol=:mean,
         "got :$aggregate"))
     c = _covariate(x)
     aggregate === :catdiff || _require_numeric(c, "HyperCovariate(aggregate=:$aggregate)")
+    aggregate === :homogeneity && !all(v -> v == 0 || v == 1, c.values) && throw(ArgumentError(
+        "HyperCovariate(aggregate=:homogeneity) is defined for a binary (0/1) " *
+        "covariate; :$(c.label) takes other values"))
     f = _transform_fn(transform)
     base = "$(aggregate).$(c.label)" * (endpoint === :all ? "" : ".$(endpoint)")
     return HyperCovariate{typeof(f)}(c, endpoint, aggregate, f,
@@ -1620,7 +1651,7 @@ const _HYPER_TIES_REASONS = Dict(
               "consume; holding the history fixed across the tied events IS the " *
               "Breslow correction, so pass `ties=:breslow` instead")
 
-const _HYPER_SAMPLERS = (:uniform, :receivers)
+const _HYPER_SAMPLERS = (:auto, :uniform, :receivers)
 const _HYPER_BOOKKEEPING = ("senders", "receivers")
 
 # binomial(n, k), saturating at typemax(Int) instead of overflowing
@@ -1712,6 +1743,12 @@ function _sample_hyperedges!(rng::AbstractRNG, out::Vector{_Hyperedge},
     return out
 end
 
+# `:auto` is the sender-stratified design for directed hyperevents (Lerner &
+# Lomi 2023) and the uniform one for undirected hyperevents, which have no senders
+_resolve_sampler(sampler::Symbol, sorted) =
+    sampler !== :auto ? sampler :
+    (!isempty(sorted) && is_directed(first(sorted))) ? :receivers : :uniform
+
 function _hyper_pool(actors, n_actors::Int)
     n_actors >= 2 || throw(ArgumentError("need at least two actors"))
     actors === nothing && return collect(1:n_actors)
@@ -1772,7 +1809,7 @@ end
 
 """
     hyper_design(events, statistics, n_actors; n_controls=20,
-                 rng=Random.default_rng(), sampler=:uniform, ties=:error,
+                 rng=Random.default_rng(), sampler=:auto, ties=:error,
                  actors=nothing) -> DataFrame
 
 The case-control design of a relational hyperevent model (Lerner & Lomi 2023;
@@ -1799,17 +1836,22 @@ describing each row's hyperedge, and one column per statistic, named by
 `name(stat)`. The tie policy that applied rides along as the `"tie_method"`
 metadata.
 
-- `sampler` — `:uniform` draws whole hyperedges (senders and receivers).
-  `:receivers` keeps the observed senders and draws receiver sets only: the
-  design of Lerner & Lomi (2023), whose baseline is stratified by sender and
-  receiver-set size. Under it a statistic of the senders alone
+- `sampler` — `:receivers` keeps the observed senders and draws receiver sets
+  only: the design of Lerner & Lomi (2023), whose baseline is stratified by
+  sender and receiver-set size. Under it a statistic of the senders alone
   ([`HyperSenderActivity`](@ref), a sender covariate) is constant within every
-  stratum and not identified.
+  stratum and not identified. `:uniform` draws whole hyperedges (senders and
+  receivers); for directed hyperevents it assumes every sender set is equally
+  likely to act, and is biased when senders differ in how often they act
+  unless the model accounts for it. `:auto` (the default) is `:receivers` for
+  directed hyperevents and `:uniform` for undirected ones.
 - `ties` — `:error` (default), `:ordered` (sequence order, no correction) or
   `:breslow` (the history is frozen across a block of tied events), with the
   meaning they have in [`each_risk_set`](@ref). `:efron` and `:batch` are
   refused with the reason.
-- `actors` — the actor IDs at risk (default `1:n_actors`). Every observed
+- `actors` — the actor IDs at risk (default `1:n_actors`), or a function
+  `(index, event) -> actor IDs` when the actors at risk change over the sequence
+  (actors joining or leaving). Every observed
   participant must be among them.
 
 A statistic that depends on the size of the hyperedge alone
@@ -1828,22 +1870,26 @@ design[design.is_event, "subrep(2)"]     # [0.0, 1/3, 2.0]
 """
 function hyper_design(events::AbstractVector{HyperEvent{T}}, statistics, n_actors::Int;
                       n_controls::Int=20, rng::AbstractRNG=Random.default_rng(),
-                      sampler::Symbol=:uniform, ties::Symbol=:error,
+                      sampler::Symbol=:auto, ties::Symbol=:error,
                       actors=nothing) where T
     check_tie_policy(ties, _HYPER_TIES_SUPPORTED; model=_HYPER_TIES_MODEL,
                      reasons=_HYPER_TIES_REASONS)
     sampler in _HYPER_SAMPLERS || throw(ArgumentError(
-        "sampler must be :uniform (draw whole hyperedges of the observed size) or " *
-        ":receivers (keep the observed senders, draw receiver sets), got :$sampler"))
+        "sampler must be :auto, :uniform (draw whole hyperedges of the observed " *
+        "size) or :receivers (keep the observed senders, draw receiver sets), got " *
+        ":$sampler"))
     n_controls >= 1 || throw(ArgumentError("n_controls must be at least 1"))
     isempty(events) && throw(ArgumentError("no hyperevents to build a design from"))
     names = _hyper_stat_names(statistics)
     stats = Tuple(statistics)
     p_stats = length(names)
-    pool = _hyper_pool(actors, n_actors)
+    # `actors` may change from event to event: a function (index, event) -> actors
+    dynamic = actors isa Function
+    pool = dynamic ? Int[] : _hyper_pool(actors, n_actors)
     n = length(pool)
 
     sorted = sort(events; by=e -> e.time)
+    sampler = _resolve_sampler(sampler, sorted)
     blocks = _hyper_tie_blocks(sorted)
     has_ties = any(b -> length(b) > 1, blocks)
     if ties === :error && has_ties
@@ -1880,6 +1926,11 @@ function hyper_design(events::AbstractVector{HyperEvent{T}}, statistics, n_actor
     for block in blocks
         for m in block
             ev = sorted[m]
+            if dynamic
+                pool = _hyper_pool(actors(m, ev), n_actors)
+                n = length(pool)
+                empty!(work); append!(work, pool)
+            end
             p, q = length(ev.senders), length(ev.receivers)
             for set in (ev.senders, ev.receivers), a in set
                 insorted(a, pool) || throw(ArgumentError(
@@ -1979,7 +2030,11 @@ struct HyperFit{F, T}
     ties::Symbol
 end
 
-function Base.show(io::IO, fit::HyperFit)
+Base.show(io::IO, fit::HyperFit) =
+    print(io, "HyperFit(", length(fit.events), " hyperevents, ", length(fit.statistics),
+          " statistic", length(fit.statistics) == 1 ? "" : "s", ")")
+
+function Base.show(io::IO, ::MIME"text/plain", fit::HyperFit)
     directed = !isempty(fit.events) && is_directed(first(fit.events))
     println(io, "Revel relational hyperevent model")
     println(io, "  events:    ", length(fit.events), directed ? ", directed" : ", undirected")
@@ -1989,12 +2044,33 @@ function Base.show(io::IO, fit::HyperFit)
             " (up to ", fit.n_controls, " sampled controls)")
     println(io, "  estimator: REM.fit_rem on the hyperevent design")
     println(io)
-    show(io, fit.fit)
+    # REM's printout speaks of dyads and of a full risk set that a hyperevent
+    # model cannot enumerate; say it in hyperedges
+    text = sprint(show, fit.fit)
+    text = replace(text, r"(Risk-set size:[^\n]*?)dyads" => s"\1hyperedges")
+    text = replace(text, r"refit with a\s+larger `n_controls` or the full risk set, or measure the draw-to-draw\s+spread with `control_draw_cov`\." =>
+                   "refit with a larger\n`n_controls`, or with another `rng`, and compare.")
+    print(io, text)
+end
+
+# REM's list speaks of dyads and suggests remedies that do not exist for
+# hyperedges; replace its sampling entry with the hyperevent one
+function approximations(fit::HyperFit)
+    return map(approximations(fit.fit)) do note
+        startswith(note, "case-control sampling of the risk set") || return note
+        "case-control sampling of hyperedges: each stratum holds the observed " *
+        "hyperedge and up to $(fit.n_controls) others of the same size " *
+        (fit.sampler === :receivers ? "with the same senders " : "") *
+        "drawn uniformly, so the partial likelihood approximates the one over " *
+        "every hyperedge of that size; if the model is misspecified the " *
+        "estimates depend on the draw — refit with a larger `n_controls`, or " *
+        "with another `rng`, and compare"
+    end
 end
 
 """
     fit_rhem(events, statistics, n_actors; n_controls=20,
-             rng=Random.default_rng(), sampler=:uniform, ties=:error,
+             rng=Random.default_rng(), sampler=:auto, ties=:error,
              actors=nothing, se=:hessian, maxiter=100, tol=1e-8) -> HyperFit
 
 Fit a relational hyperevent model (RHEM; Lerner, Tranmer, Mowbray & Hâncean
@@ -2012,7 +2088,8 @@ collinearity and separation are reported as that function reports them.
 
 Sampling non-events leaves the estimator consistent; the estimates vary from
 one draw of controls to the next, so fix `rng` for reproducibility and raise
-`n_controls` to reduce that variation. Statistic names must be unique.
+`n_controls` to reduce that variation — the default 20 keeps small examples
+fast, and the papers use about 100. Statistic names must be unique.
 
 # Example
 ```julia
@@ -2027,12 +2104,13 @@ stderror(fit)                    # from the conditional-logit information
 function fit_rhem(events::AbstractVector{HyperEvent{T}},
                   statistics::AbstractVector{<:AbstractStatistic}, n_actors::Int;
                   n_controls::Int=20, rng::AbstractRNG=Random.default_rng(),
-                  sampler::Symbol=:uniform, ties::Symbol=:error, actors=nothing,
+                  sampler::Symbol=:auto, ties::Symbol=:error, actors=nothing,
                   se::Symbol=:hessian, maxiter::Int=100, tol::Float64=1e-8) where T
     isempty(events) && throw(ArgumentError("no hyperevents to fit"))
     names = _hyper_stat_names(statistics)
     stats = collect(AbstractStatistic, statistics)
     sorted = sort(collect(HyperEvent{T}, events); by=e -> e.time)
+    sampler = _resolve_sampler(sampler, sorted)
     design = hyper_design(sorted, stats, n_actors; n_controls=n_controls, rng=rng,
                           sampler=sampler, ties=ties, actors=actors)
     inner = REM.fit_rem(design, names; maxiter=maxiter, tol=tol, se=se)
@@ -2091,7 +2169,17 @@ is_exact(fit::HyperFit) = is_exact(fit.fit)
 se_method(fit::HyperFit) = se_method(fit.fit)
 missing_method(fit::HyperFit) = missing_method(fit.fit)
 tie_method(fit::HyperFit) = tie_method(fit.fit)
-approximations(fit::HyperFit) = approximations(fit.fit)
+
+_no_hyper(what) = throw(ArgumentError(
+    "$what is defined for dyadic relational event fits (`RevelFit`); it is not " *
+    "implemented for relational hyperevent fits. Simulate from the fitted model " *
+    "with `simulate_hyperevents(fit.statistics, coef(fit), fit.n_actors, n; " *
+    "sizes=…)` and compare summaries of your own."))
+event_diagnostics(::HyperFit; kwargs...) = _no_hyper("event_diagnostics")
+prediction_summary(::HyperFit; kwargs...) = _no_hyper("prediction_summary")
+score_process_test(::HyperFit; kwargs...) = _no_hyper("score_process_test")
+score_test(::HyperFit, candidates) = _no_hyper("score_test")
+statistic_collinearity(::HyperFit) = _no_hyper("statistic_collinearity(fit)")
 
 gof(::HyperFit; kwargs...) = throw(ArgumentError(
     "goodness of fit is not implemented for relational hyperevent fits: the " *

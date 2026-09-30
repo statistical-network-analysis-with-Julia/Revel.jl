@@ -34,8 +34,72 @@ end
 
 dyads_of(n) = [(s, r) for s in 1:n for r in 1:n if s != r]
 
+# Run a documentation block statement by statement in `mod`, and compare every
+# statement whose line ends in a `# value` comment with that value. A comment is
+# a claim when its text — after an optional leading `≈`, cut at ` — `, `; ` or
+# `  ` and at the last ` = ` — parses as a literal: numbers, strings, symbols,
+# `true`/`false`, `nothing`, `NaN`/`Inf`, vectors and tuples of those, and
+# `log`/`sqrt`/`exp` or arithmetic of numbers. Anything else is prose. A number
+# written with d decimals matches to half a unit of its last digit; `≈` allows
+# 1 %. Returns (claims checked, mismatch descriptions); throws on an error.
+const _LITERAL_CALLS = (:+, :-, :*, :/, :^, :log, :sqrt, :exp, :log1p, :log2)
+_is_literal(x) = x isa Union{Number, String, QuoteNode, Bool, Nothing} ||
+    x in (:NaN, :Inf, :nothing, :true, :false) ||
+    (x isa Expr && (x.head in (:vect, :tuple) && all(_is_literal, x.args) ||
+                    x.head === :call && x.args[1] in _LITERAL_CALLS &&
+                        all(a -> _is_literal(a) && !(a isa String), x.args[2:end])))
+function _claim(comment::AbstractString)
+    text = strip(comment)
+    approx = startswith(text, "≈")
+    approx && (text = strip(text[nextind(text, 1):end]))
+    for sep in (" — ", " – ", "; ", "  ", " (")
+        text = first(split(text, sep))
+    end
+    occursin(" = ", text) && (text = strip(last(split(text, " = "))))
+    isempty(text) && return nothing
+    ex = try Meta.parse(text; raise=true) catch; return nothing end
+    (ex isa Expr && ex.head === :incomplete) && return nothing
+    _is_literal(ex) || return nothing
+    digits = maximum((length(m.captures[1]) for m in eachmatch(r"\d\.(\d+)", text)); init=0)
+    return (value=Core.eval(Main, ex), approx=approx, digits=digits, text=text)
+end
+_matches(v, c) = false
+_matches(v::Number, c::Number, approx, digits) =
+    (isnan(c) && isnan(v)) || v == c ||
+    (approx ? isapprox(v, c; rtol=0.01, atol=1e-12) :
+     digits > 0 && abs(v - c) <= 0.5 * 10.0^(-digits) * (1 + 1e-9))
+_matches(v::AbstractString, c::AbstractString, _, _) = v == c
+_matches(v::Symbol, c::Symbol, _, _) = v == c
+_matches(v::Bool, c::Bool, _, _) = v == c
+_matches(v::Nothing, c::Nothing, _, _) = true
+_matches(v::Union{AbstractVector,Tuple}, c::Union{AbstractVector,Tuple}, a, d) =
+    length(v) == length(c) && all(_matches(x, y, a, d) for (x, y) in zip(v, c))
+_matches(v, c, a, d) = false
+function check_block(mod::Module, block::AbstractString; where="")
+    checked = 0; bad = String[]
+    pos = 1
+    while pos <= lastindex(block)
+        ex, next = Meta.parse(block, pos; raise=true)
+        src = block[pos:prevind(block, next)]
+        pos = next
+        ex === nothing && continue
+        val = Core.eval(mod, ex)
+        line = rstrip(last(split(rstrip(src), "\n")))
+        # the comment of the statement's last line (not a `#` inside a string)
+        m = match(r"^(?:[^\"#]|\"(?:[^\"\\]|\\.)*\")*#(.*)$", line)
+        m === nothing && continue
+        startswith(strip(line), "#") && continue
+        c = _claim(m.captures[1])
+        c === nothing && continue
+        checked += 1
+        _matches(val, c.value, c.approx, c.digits) ||
+            push!(bad, "$where: `$(strip(split(line, "#")[1]))` is $(repr(val)), the comment says $(c.text)")
+    end
+    return checked, bad
+end
+
 const MEMORIES = (FullMemory(), HalfLife(3.0), HalfLife(3.0; normalized=true),
-                  Window(4.0), Interval(1.0, 6.0), PowerLaw(0.7; offset=0.5),
+                  Window(4.0), IntervalMemory(1.0, 6.0), PowerLaw(0.7; offset=0.5),
                   LinearDecay(8.0), KernelMemory(a -> 1 / (1 + a)^2))
 
 # ----------------------------------------------------------------------------
@@ -52,8 +116,8 @@ const MEMORIES = (FullMemory(), HalfLife(3.0), HalfLife(3.0; normalized=true),
     # so adjacent intervals partition the past without double counting
     @test kernel_weight(Window(3.0), 3.0) == 1.0
     @test kernel_weight(Window(3.0), 3.0 + 1e-9) == 0.0
-    @test kernel_weight(Interval(1.0, 7.0), 1.0) == 0.0
-    @test kernel_weight(Interval(1.0, 7.0), 7.0) == 1.0
+    @test kernel_weight(IntervalMemory(1.0, 7.0), 1.0) == 0.0
+    @test kernel_weight(IntervalMemory(1.0, 7.0), 7.0) == 1.0
     for age in (0.0, 0.5, 1.0, 3.0, 7.0, 7.5)
         parts = interval_partition([0.0, 1.0, 7.0])
         @test sum(kernel_weight(m, age) for m in parts) ==
@@ -69,8 +133,8 @@ const MEMORIES = (FullMemory(), HalfLife(3.0), HalfLife(3.0; normalized=true),
     @test_throws ArgumentError HalfLife(0.0)
     @test_throws ArgumentError HalfLife(Inf; normalized=true)
     @test_throws ArgumentError Window(-1.0)
-    @test_throws ArgumentError Interval(2.0, 2.0)
-    @test_throws ArgumentError Interval(-1.0, 2.0)
+    @test_throws ArgumentError IntervalMemory(2.0, 2.0)
+    @test_throws ArgumentError IntervalMemory(-1.0, 2.0)
     @test_throws ArgumentError PowerLaw(0.0)
     @test_throws ArgumentError PowerLaw(1.0; offset=-1.0)
     @test_throws ArgumentError LinearDecay(0.0)
@@ -117,7 +181,7 @@ end
     # half-life 1: the two 1 → 2 events are 3 and 1 time units old at t = 4
     @test compute(Inertia(memory=HalfLife(1.0)), h, 1, 2, 4.0) ≈ 0.5^3 + 0.5
     @test compute(Inertia(memory=Window(1.0)), h, 1, 2, 4.0) == 1.0
-    @test compute(Inertia(memory=Interval(1.0, 3.0)), h, 1, 2, 4.0) == 1.0   # only t = 1
+    @test compute(Inertia(memory=IntervalMemory(1.0, 3.0)), h, 1, 2, 4.0) == 1.0   # only t = 1
     # event clock: the 1 → 2 events are the 1st and 3rd of 4, i.e. 4 and 2 events old
     @test compute(Inertia(memory=HalfLife(2.0), clock=:order), h, 1, 2, 4.0) ≈ 0.25 + 0.5
 
@@ -214,11 +278,9 @@ end
     @test compute(stat, h, 1, 2, t_end) ≈ ref_weight(events, 1, 2, t_end, HalfLife(2.0))
     # Replaying a history in place (what Relevent's streamed risk sets do)
     # rebuilds the layer rather than double counting
-    empty!(h.events); empty!(h.sender_history); empty!(h.receiver_history)
-    empty!(h.pair_history); empty!(h.event_counts)
-    for e in events[1:10]
-        update_history!(h, e)
-    end
+    # (only the documented `events` field: that is all a layer reads)
+    empty!(h.events)
+    append!(h.events, events[1:10])
     t10 = events[11].time
     @test compute(stat, h, 1, 2, t10) ≈ ref_weight(events[1:10], 1, 2, t10, HalfLife(2.0))
     @test compute(win, h, 1, 2, t10) ==
@@ -354,6 +416,19 @@ end
     @test compute(TwoPathEffect(B, B), mixed, 1, 2, 5.0) == 1.0
     @test compute(TwoPathEffect(B, A), mixed, 1, 2, 5.0) == 0.0
 
+    # a symmetric leg reads both directions: through 3, w(1,3) + w(3,1) = 1 + 2
+    # on the sender's side and w(3,2) = 1 on the receiver's
+    sym = build_history([Event(1, 3, 1.0), Event(3, 1, 2.0), Event(3, 1, 2.5),
+                         Event(3, 2, 3.0), Event(2, 4, 3.5)])
+    L = EventLayer()
+    @test compute(TwoPathEffect(L; dir1=:sym), sym, 1, 2, 4.0) == 1.0         # min(3, 1)
+    @test compute(TwoPathEffect(L; dir1=:sym, combine=:sum), sym, 1, 2, 4.0) == 4.0
+    @test compute(TwoPathEffect(L; dir1=:sym, dir2=:sym, combine=:product), sym, 1, 2,
+                  4.0) == 3.0 * 1.0
+    # … and a third actor reached only by the receiver's leg adds nothing
+    @test compute(TwoPathEffect(L; dir1=:sym, dir2=:sym, combine=:product), sym, 1, 4,
+                  4.0) == 0.0
+
     @test name(OTP()) == "otp"
     @test name(OTP(combine=:count)) == "otp.count"
     @test name(ISP(memory=Window(2.0))) == "isp[window=2.0]"
@@ -370,9 +445,12 @@ end
                        Event(4, 1, 3.0; eventtype=:negative),
                        Event(4, 2, 4.0; eventtype=:negative),
                        Event(4, 2, 5.0; eventtype=:negative)])
-    # 3 is 1's friend and 2's enemy; 4 is an enemy of both (weights 1 and 2)
-    @test compute(BalanceEffect(:friend_of_enemy), h, 1, 2, 6.0) == 1.0
-    @test compute(BalanceEffect(:enemy_of_friend), h, 2, 1, 6.0) == 1.0
+    # 3 is 1's friend and 2's enemy, so 2 is an enemy of 1's friend and 1 is a
+    # friend of 2's enemy (Brandes et al. 2009: friendOfEnemy(a,b) = √Σ ω⁻(a,i)ω⁺(i,b));
+    # 4 is an enemy of both (weights 1 and 2)
+    @test compute(BalanceEffect(:enemy_of_friend), h, 1, 2, 6.0) == 1.0
+    @test compute(BalanceEffect(:friend_of_enemy), h, 2, 1, 6.0) == 1.0
+    @test compute(BalanceEffect(:friend_of_enemy), h, 1, 2, 6.0) == 0.0
     @test compute(BalanceEffect(:friend_of_friend), h, 1, 2, 6.0) == 0.0
     @test compute(BalanceEffect(:enemy_of_enemy), h, 1, 2, 6.0) ≈ sqrt(1 * 2)
     @test compute(BalanceEffect(:enemy_of_enemy; root=false), h, 1, 2, 6.0) == 2.0
@@ -901,6 +979,25 @@ end
     @test coef(rem_fit) ≈ coef(exact) atol = 1e-8
     # ... and as Relevent.fit_obpm called directly
     @test coef(fit_obpm(events, truth, n)) == coef(exact)
+    # … and a log partial likelihood written out from its definition, with
+    # statistics computed afresh for every event: the fitted value, and a maximum
+    function brute_loglik(θ)
+        h = InteractionHistory{Float64}(); ll = 0.0
+        own = [Inertia(transform=:log1p), Reciprocation(transform=:log1p),
+               OTP(transform=:log1p)]
+        for e in sort(events; by=x -> x.time)
+            η = Dict((s, r) => sum(θ[k] * compute(own[k], h, s, r, e.time) for k in 1:3)
+                     for s in 1:n for r in 1:n if s != r)
+            ll += η[(e.sender, e.receiver)] - log(sum(exp, values(η)))
+            update_history!(h, e)
+        end
+        return ll
+    end
+    @test brute_loglik(coef(exact)) ≈ loglikelihood(exact) rtol = 1e-10
+    for k in 1:3, δ in (-1e-3, 1e-3)
+        θ = copy(coef(exact)); θ[k] += δ
+        @test brute_loglik(θ) < loglikelihood(exact)
+    end
 
     # the StatsAPI surface and the result-metadata protocol
     for fit in (exact, design)
@@ -916,7 +1013,8 @@ end
         @test Networks.is_exact(fit)
         @test Networks.tie_method(fit) === :none
         @test isempty(Networks.approximations(fit))
-        @test occursin("Revel relational event model", sprint(show, fit))
+        @test occursin("Revel relational event model", sprint(show, MIME"text/plain"(), fit))
+        @test sprint(show, fit) == "RevelFit(ordinal, 300 events, 3 statistics)"
     end
     @test Networks.objective(exact) === :likelihood
     @test Networks.se_method(design) === :hessian
@@ -958,8 +1056,8 @@ end
     @test nobs(choice) == 400
     @test all(abs.(coef(choice) .- [0.8, 0.6]) .< 4 .* stderror(choice))
     # a sender covariate is constant within every choice set: not identified
-    sender_only = fit_receiver_choice(events, [Inertia(transform=:log1p),
-                                               SendEffect(collect(1.0:n))], n)
+    sender_only = @test_logs (:warn,) (:warn,) (:warn,) match_mode=:any fit_receiver_choice(
+        events, [Inertia(transform=:log1p), SendEffect(collect(1.0:n))], n)
     @test sender_only.fit.singular
     @test isnan(stderror(sender_only)[2])
     @test !Networks.is_exact(sender_only)
@@ -968,7 +1066,7 @@ end
     late = fit_revel(events, stats, n; cases=201:400)
     @test nobs(late) == 200 && count(late.cases) == 200
     @test late.engine === :design
-    @test occursin("200 modelled as cases", sprint(show, late))
+    @test occursin("200 modelled as cases", sprint(show, MIME"text/plain"(), late))
     @test_throws ArgumentError fit_revel(events, stats, n; cases=e -> false)
 
     # sampled controls are reproducible from rng, and close to the full fit
@@ -1001,7 +1099,9 @@ end
     @test all(e -> e.sender in users && e.receiver in items, tm)
     tfit = fit_revel(tm, tm_stats, 9; riskset=two_mode_dyads(users, items))
     @test all(tfit.fit.risk_set_sizes .== 20) && tfit.fit.converged
-    @test occursin("20 listed dyads", sprint(show, tfit))
+    # and it recovers the coefficients that generated the data
+    @test all(abs.(coef(tfit) .- [0.7, 0.3, 0.2]) .< 4 .* stderror(tfit))
+    @test occursin("20 listed dyads", sprint(show, MIME"text/plain"(), tfit))
 
     # tied data: refused by default, fitted under a named policy
     # a coarse clock: an event shares its predecessor's timestamp whenever the
@@ -1047,9 +1147,14 @@ end
     @test coefnames(fit) == ["log1p(inertia)", "late:log1p(inertia)"]
     @test all(abs.(coef(fit) .- [0.4, 1.0]) .< 4 .* stderror(fit))
     @test coef(fit)[2] / stderror(fit)[2] > 2
-    # on its own it is constant across every risk set
-    alone = fit_revel(events, [Inertia(transform=:log1p), late], n; engine=:design)
-    @test alone.fit.singular
+    # on its own it is constant across every risk set: refused by both engines,
+    # and singular when the design is fitted directly
+    for engine in (:relevent, :design)
+        @test_throws ArgumentError fit_revel(events, [Inertia(transform=:log1p), late], n;
+                                             engine=engine)
+    end
+    design = event_design(events, [Inertia(transform=:log1p), late], n)
+    @test (@test_logs (:warn,) match_mode=:any REM.fit_rem(design, ["log1p(inertia)", "late"])).singular
     check = statistic_collinearity(events, [Inertia(), late], n)
     @test check.vif[2] == Inf && isnan(check.correlation[1, 2])
 end
@@ -1096,7 +1201,7 @@ end
     profile = profile_memory(ev, 6, [0.5, 5.0, 50.0, 500.0]) do h
         [Inertia(memory=HalfLife(h), transform=:log1p)]
     end
-    @test names(profile) == ["value", "loglik", "aic", "bic", "converged", "best"]
+    @test names(profile) == ["value", "loglik", "aic", "bic", "converged", "in_ci", "best"]
     @test profile.value[profile.best] == [5.0]
     @test count(profile.best) == 1 && all(profile.converged)
     @test_throws ArgumentError profile_memory(h -> [Inertia()], ev, 6, Float64[])
@@ -1166,21 +1271,30 @@ end
     d = event_diagnostics(fit)
     @test size(d, 1) == 300
     @test names(d) == ["event_index", "time", "sender", "receiver", "risk_set_size",
-                       "probability", "rank", "rank_fraction", "deviance_residual",
-                       "null_residual", "surprise"]
+                       "probability", "rank", "n_above", "n_tied", "reciprocal_rank",
+                       "rank_fraction", "deviance_residual", "null_residual", "surprise"]
+    @test d.rank == d.n_above .+ (d.n_tied .+ 1) ./ 2
     @test all(0 .< d.probability .<= 1)
     @test all(1 .<= d.rank .<= 30)
     # the deviance residuals add up to the fitted deviance
     @test sum(d.deviance_residual) ≈ -2loglikelihood(fit)
     @test all(d.null_residual .≈ 2log(30))
-    # before any event every dyad is equally likely and shares the average rank
+    # before any event every dyad is equally likely and shares the average rank;
+    # its expected reciprocal rank under random tie-breaking is the mean of 1/k
     @test d.probability[1] ≈ 1 / 30 && d.rank[1] == 15.5
+    @test d.n_above[1] == 0 && d.n_tied[1] == 30
+    @test d.reciprocal_rank[1] ≈ sum(1 ./ (1:30)) / 30
     @test d.surprise ≈ -log2.(d.probability)
 
     s = prediction_summary(fit; ks=(1, 5, 0.2))
     @test s.n_events == 300 && s.ks == [1, 5, 0.2]
-    @test issorted(s.recall) && s.recall[1] == count(<=(1), d.rank) / 300
-    @test s.recall[3] == count(<=(6), d.rank) / 300          # 20 % of 30 dyads
+    # recall credits a tie as a random tie-break would: the expected recall
+    expected(cut) = sum(clamp.((cut .- d.n_above) ./ d.n_tied, 0, 1)) / 300
+    @test issorted(s.recall) && s.recall[1] ≈ expected(1)
+    @test s.recall[3] ≈ expected(6)                           # 20 % of 30 dyads
+    # … so the event tied with the whole risk set earns 1/30, not 0, at k = 1
+    @test expected(1) > count(<=(1), d.rank) / 300
+    @test s.mean_reciprocal_rank ≈ mean(d.reciprocal_rank)
     @test s.deviance ≈ -2loglikelihood(fit)
     @test s.null_deviance ≈ 600log(30)
     @test 0 < s.pseudo_r2 < 1
@@ -1322,14 +1436,23 @@ end
     @test r1.statistics[1].simulated == r2.statistics[1].simulated
     @test occursin("Goodness-of-fit", sprint(show, result))
 
-    # a model without reciprocity cannot reproduce data generated with strong
-    # reciprocity
-    strong = simulate_events(stats, [0.2, 2.5], n, 300; rng=Xoshiro(4))
-    poor = gof(fit_revel(strong, stats[1:1], n); n_sim=200, rng=Xoshiro(5))
-    good = gof(fit_revel(strong, stats, n); n_sim=200, rng=Xoshiro(5))
-    # ... it concentrates activity in too few dyads and actors
-    @test maximum(poor.statistics[2].p_values) < 0.05
-    @test minimum(good.statistics[2].p_values) > 0.05
+    @test 0 < result.p_overall <= 1
+
+    # A model without reciprocity cannot reproduce data generated with strong
+    # reciprocity, and the joint (Mahalanobis) test says so. Calibrated when this
+    # test was written, over fresh seeds: the joint test rejected the poor model
+    # in 40 of 40 data sets and the true one in 7 of 320 (2 %), so asking for two
+    # rejections (acceptances) out of three data sets fails by chance about once
+    # in 300 runs — no seed is tuned. (The per-statistic p-values are pointwise
+    # and far weaker: a single auxiliary caught the omission in 19 of 40.)
+    rejected = map(1:3) do k
+        strong = simulate_events(stats, [0.2, 2.5], n, 300; rng=Xoshiro(40 + k))
+        poor = gof(fit_revel(strong, stats[1:1], n); n_sim=100, rng=Xoshiro(50 + k))
+        good = gof(fit_revel(strong, stats, n); n_sim=100, rng=Xoshiro(60 + k))
+        (poor.p_overall <= 0.05, good.p_overall <= 0.05)
+    end
+    @test count(first, rejected) >= 2
+    @test count(last, rejected) <= 1
 
     own = gof(fit; n_sim=10, rng=Xoshiro(6),
               auxiliary=[("events by actor 1", ["sent"],
@@ -1376,6 +1499,446 @@ end
 end
 
 # ----------------------------------------------------------------------------
+# Regressions from the adversarial panel review (2026-09-30)
+# ----------------------------------------------------------------------------
+
+# ----------------------------------------------------------------------------
+# The second review round: scale, thread safety, refusals, disclosures
+# ----------------------------------------------------------------------------
+
+@testset "Layers: sparse storage for large actor IDs" begin
+    # The same sequence on actors 1–4 and on actors shifted beyond the dense
+    # threshold (the dyad → slot map becomes a hash map): identical statistics
+    rng = Xoshiro(31)
+    small = random_events(rng, 4, 60)
+    shift = Revel._DENSE_MAX + 1000
+    big = [Event(e.sender + shift, e.receiver + shift, e.time) for e in small]
+    for mk in (() -> Inertia(), () -> Reciprocation(memory=Window(5.0)),
+               () -> OTP(memory=HalfLife(3.0)), () -> RecencyRank(:send),
+               () -> OutdegreeSender(scaling=:prop), () -> TimeSince(:pair))
+        a, b = mk(), mk()
+        hs, hb = build_history(small), build_history(big)
+        t = small[end].time + 1
+        @test [compute(a, hs, i, j, t) for i in 1:4, j in 1:4 if i != j] ==
+              [compute(b, hb, i + shift, j + shift, t) for i in 1:4, j in 1:4 if i != j]
+    end
+    # memory grows with the dyads that have a history, not with the largest ID
+    stat = Inertia()
+    compute(stat, build_history(big), 1 + shift, 2 + shift, 1e6)
+    @test Base.summarysize(stat) < 2^20
+    @test_throws ArgumentError compute(Inertia(), build_history([Event(2^31, 1, 1.0)]),
+                                       1, 2, 2.0)
+end
+
+@testset "Layers: private copies, shared layers, thread safety" begin
+    n = 6
+    stats = [Inertia(transform=:log1p), Reciprocation(transform=:log1p), OTP()]
+    sequences = [simulate_events(stats[1:2], [0.8, 0.5], n, 120; rng=Xoshiro(70 + k))
+                 for k in 1:8]
+    serial = [coef(fit_revel(ev, stats, n)) for ev in sequences]
+    # the fit worked on copies: the user's statistics hold no cache
+    @test all(isempty(s.layer.states) for s in stats[1:2]) && isempty(stats[3].leg1.states)
+    # one specification fitted from several tasks at once
+    parallel = fetch.([Threads.@spawn coef(fit_revel(ev, stats, n)) for ev in sequences])
+    @test parallel == serial
+    parallel = fetch.([Threads.@spawn coef(fit_revel(ev, stats, n; engine=:design))
+                       for ev in sequences])
+    @test parallel ≈ serial atol = 1e-8
+    # a copy merges layers with the same keywords (one index of the history)
+    copies = Revel._fresh(stats)
+    @test copies[1].layer === copies[2].layer === copies[3].leg1
+    @test copies[1].layer !== stats[1].layer
+    # … but keeps apart layers that differ
+    other = Revel._fresh([Inertia(), Inertia(memory=Window(2.0), name="w")])
+    @test other[1].layer !== other[2].layer
+end
+
+# A statistic that counts its evaluations (the counter is global: the fitters
+# evaluate copies of the statistics)
+const EVALUATIONS = Ref(0)
+struct CountingStatistic <: AbstractRevelStatistic
+    label::String
+end
+Revel._value(::CountingStatistic, events, s::Int, r::Int, t::Float64) =
+    (EVALUATIONS[] += 1; Float64(s == 1))
+Revel._uses_history(::CountingStatistic) = false
+
+@testset "Sampled controls cost the rows drawn, not the risk set" begin
+    n = 12
+    events = random_events(Xoshiro(2), n, 50)
+    EVALUATIONS[] = 0
+    event_design(events, [CountingStatistic("c")], n; n_controls=3, rng=Xoshiro(1))
+    @test EVALUATIONS[] == 50 * 4
+    EVALUATIONS[] = 0
+    full = event_design(events, [CountingStatistic("c")], n)
+    @test EVALUATIONS[] == 50 * n * (n - 1)
+    # the design is the same frame either way: case first, then the controls
+    sampled = event_design(events, [Inertia(), Reciprocation()], n; n_controls=3,
+                           rng=Xoshiro(1))
+    @test size(sampled, 1) == 50 * 4 && all(sampled.risk_set_size .== n * (n - 1))
+    @test all(sampled.sampling_prob .≈ 3 / (n * (n - 1) - 1))
+    for g in groupby(sampled, :stratum)
+        @test count(g.is_event) == 1 && g.is_event[1]
+        @test allunique(zip(g.sender, g.receiver))
+    end
+    # a sampled row carries the statistic the full design gives that dyad
+    key(df) = Dict((r.event_index, r.sender, r.receiver) => (r.inertia, r.reciprocity)
+                   for r in eachrow(df))
+    fullkey = key(event_design(events, [Inertia(), Reciprocation()], n))
+    @test all(fullkey[k] == v for (k, v) in key(sampled))
+end
+
+@testset "Refusals: inputs that would give a silently wrong fit" begin
+    n = 4
+    events = random_events(Xoshiro(3), n, 40)
+    stats = [Inertia()]
+    # a REM.jl statistic has no history interface
+    err = try fit_revel(events, [REM.Repetition()], n) catch e e end
+    @test err isa ArgumentError && occursin("REM.jl statistic", err.msg)
+    # a self-loop, a non-finite time
+    @test_throws ArgumentError fit_revel([events; Event(2, 2, 100.0)], stats, n)
+    @test_throws ArgumentError fit_revel([events; Event(1, 2, NaN)], stats, n)
+    @test_throws ArgumentError event_design([events; Event(1, 2, Inf)], stats, n)
+    # a sender outside the actors of a receiver-choice risk set
+    @test_throws ArgumentError event_design([Event(0, 1, 0.5); events], stats, n;
+                                            riskset=:sender)
+    @test_throws ArgumentError simulate_events(stats, [0.0], n, 2; riskset=:sender,
+                                               senders=[1, 9])
+    # a function risk set that lists a dyad twice
+    twice = (m, e) -> [(e.sender, e.receiver), (e.sender, e.receiver), (1, 2), (2, 1)]
+    @test_throws ArgumentError event_design(events, stats, n; riskset=twice)
+    # keep= reads the event type, which REM's event log does not carry
+    state = REM.EventNetworkState{Float64}(); state.keep_history = true
+    REM.update!(state, events[1]); state.current_time = 10.0
+    @test_throws ArgumentError compute(Inertia(keep=(s, r, t, w, ty) -> ty === :email),
+                                       state, 1, 2)
+    # ranks and recencies take no memory kernel
+    @test_throws ArgumentError RecencyRank(:send; memory=Window(2.0))
+    @test_throws ArgumentError TimeSince(:dyad; memory=HalfLife(2.0))
+    @test_throws ArgumentError RecencyRank(; layer=EventLayer(memory=Window(2.0)))
+    # a stratifier with no key for an event
+    err = try fit_stratified(events, stats, n; by=e -> e.time < 5 ? missing : :a) catch e e end
+    @test err isa ArgumentError && occursin("stratum key", err.msg)
+    # diagnostics of a fit that did not converge
+    capped = Base.CoreLogging.with_logger(Base.CoreLogging.NullLogger()) do
+        fit_revel(events, [Inertia(), Reciprocation()], n; maxiter=1, engine=:design)
+    end
+    if !capped.fit.converged
+        @test_throws ArgumentError score_test(capped, [OTP()])
+        @test_throws ArgumentError score_process_test(capped)
+        @test_throws ArgumentError gof(capped)
+        @test_throws ArgumentError event_diagnostics(capped)
+    end
+end
+
+@testset "Standardized standardises over the model's risk set" begin
+    n = 5
+    stats = [Inertia(transform=:log1p)]
+    events = simulate_events(stats, [1.0], n, 80; rng=Xoshiro(4))
+    @test fit_revel(events, [Standardized(Inertia(), n)], n).fit.converged
+    for bad in [(Standardized(Inertia(), n + 1), (;)),
+                (Standardized(Inertia(), n), (; directed=false)),
+                (Standardized(Inertia(), n), (; riskset=:sender)),
+                (Standardized(Inertia(), n), (; riskset=:active))]
+        @test_throws ArgumentError fit_revel(events, [bad[1]], n; bad[2]...)
+    end
+    # an explicit set of dyads: the two-mode risk set
+    users, items = 1:2, 3:5
+    tm = simulate_events([Inertia(transform=:log1p)], [1.0], n, 60;
+                         riskset=two_mode_dyads(users, items), rng=Xoshiro(5))
+    set = two_mode_dyads(users, items)
+    z = Standardized(Inertia(), set)
+    fz = fit_revel(tm, [z], n; riskset=set)
+    @test fz.fit.converged
+    design = event_design(tm, [z], n; riskset=set)
+    # z-scored within every risk set: mean 0 over the set (population sd)
+    @test all(abs(mean(g[!, "std(inertia)"])) < 1e-12 for g in groupby(design, :stratum))
+    @test_throws ArgumentError fit_revel(tm, [z], n; riskset=set[1:4])
+    # the wrapper accepts a fractional time on an integer clock, like a bare statistic
+    hi = build_history([Event(1, 2, 1), Event(1, 2, 2)])
+    @test compute(Standardized(Inertia(), 3), hi, 1, 2, 2.5) ≈
+          compute(Standardized(Inertia(), 3), hi, 1, 2, 3)
+    @test compute(Interaction(Inertia(), Inertia(name="b")), hi, 1, 2, 2.5) == 4.0
+    @test compute(Transformed(Inertia(), log1p), hi, 1, 2, 2.5) == log1p(2.0)
+end
+
+@testset "Timing model: statistics on the event clock are admissible" begin
+    n = 5
+    events = simulate_events([Inertia(transform=:log1p)], [0.8], n, 80; baseline=0.5,
+                             rng=Xoshiro(6))
+    for stat in (Inertia(memory=HalfLife(5.0), clock=:order, transform=:log1p),
+                 TimeSince(:dyad; clock=:order))
+        @test Relevent.is_interval_constant(stat)
+        @test fit_revel(events, [stat], n; model=:timing).fit.converged
+    end
+    @test !Relevent.is_interval_constant(Inertia(memory=HalfLife(5.0)))
+    @test_throws ArgumentError fit_revel(events, [TimeSince(:dyad)], n; model=:timing)
+    # the fit records the start of its clock, and gof simulates from it
+    late = [Event(e.sender, e.receiver, e.time + 100) for e in events]
+    f = fit_revel(late, [Inertia(transform=:log1p)], n; model=:timing, t0=90.0)
+    @test f.t0 == 90.0 && f.t_end === nothing
+    g = gof(f; n_sim=5, rng=Xoshiro(7))
+    @test [s.name for s in g.statistics][end] == "waiting times"
+end
+
+@testset "Simulation freezes the history across a tie block when asked" begin
+    stats = [Inertia(transform=:log1p)]
+    times = fill(1.0, 12)
+    ordered = simulate_events(stats, [30.0], 5, 12; times=times, rng=Xoshiro(8))
+    frozen = simulate_events(stats, [30.0], 5, 12; times=times, ties=:breslow,
+                             rng=Xoshiro(8))
+    # with the history growing inside the block, the first dyad repeats; frozen,
+    # every draw is from the empty history, so dyads vary
+    @test length(unique((e.sender, e.receiver) for e in ordered)) == 1
+    @test length(unique((e.sender, e.receiver) for e in frozen)) > 1
+    @test_throws ArgumentError simulate_events(stats, [1.0], 5, 2; ties=:batch)
+    @test_throws ArgumentError simulate_events(stats, [1.0], 5, 2; t0=1.0)
+end
+
+@testset "Diagnostics: second review round" begin
+    n = 6
+    truth = [Inertia(transform=:log1p), Reciprocation(transform=:log1p)]
+    events = simulate_events(truth, [1.0, 0.8], n, 300; rng=Xoshiro(9))
+    fit = fit_revel(events, truth, n)
+    # GLOBAL: the largest standardised supremum, resampled as a maximum
+    t = score_process_test(fit; n_sim=200, rng=Xoshiro(1))
+    @test t.statistic[end] == maximum(t.statistic[1:end-1])
+    @test 0 < t.p_value[end] <= 1
+    @test all(t.p_kolmogorov .> 0)
+    # the score test of a candidate close to — but not inside — the model's span
+    small = fit_revel(events, truth[1:1], n)
+    near = score_test(small, [Inertia(memory=HalfLife(1e6), transform=:log1p,
+                                      name="nearly")])
+    @test isfinite(near.chisq[1]) && 0 < near.residual_share[1] < 1e-3
+    same = score_test(small, [Inertia(transform=:log1p, name="copy")])
+    @test isnan(same.chisq[1])
+    # collinearity: an exact duplicate makes only the duplicated pair infinite
+    dup = statistic_collinearity(events, [Inertia(), Inertia(name="c"), OTP()], n)
+    @test dup.vif[1] == dup.vif[2] == Inf && isfinite(dup.vif[3])
+    at_fit = statistic_collinearity(fit)
+    info = inv(vcov(fit))
+    @test at_fit.vif ≈ diag(info) .* diag(inv(info)) rtol = 1e-6
+    # compare_coefficients: Wald tests of stratum differences
+    fits = fit_stratified(events, truth, n; by=e -> e.time <= 150 ? :early : :late)
+    table = compare_coefficients(fits; reference=:early)
+    late = table[table.group .== :late, :]
+    early = table[table.group .== :early, :]
+    @test late.difference ≈ late.estimate .- early.estimate
+    @test late.se_difference ≈ sqrt.(late.std_error .^ 2 .+ early.std_error .^ 2)
+    @test all(ismissing, early.p_difference) && all(0 .< late.p_difference .<= 1)
+    @test_throws ArgumentError compare_coefficients(fits; reference=:middle)
+    windows = fit_moving_window(events, truth, n; width=150.0, step=75.0)
+    @test_throws ArgumentError compare_coefficients(windows; reference=windows[1].from)
+    # windows start at t_first + k * step exactly (no accumulated drift)
+    tiny = fit_moving_window(events, truth[1:1], n; width=30.0, step=0.3, min_events=20)
+    froms = [w.from for w in tiny]
+    ks = round.(Int, (froms .- events[1].time) ./ 0.3)
+    @test froms == events[1].time .+ ks .* 0.3
+    # profile_memory: one draw of controls for every grid value
+    prof = profile_memory(events, n, [5.0, 5.0, 5.0]; n_controls=5, rng=Xoshiro(3)) do h
+        [Inertia(memory=HalfLife(h), transform=:log1p)]
+    end
+    @test prof.loglik[1] == prof.loglik[2] == prof.loglik[3]
+    @test count(prof.best) == 1 && all(prof.in_ci)
+    fit5 = fit_revel(events, [Inertia(memory=HalfLife(5.0), transform=:log1p)], n)
+    prof = profile_memory(events, n, [5.0]) do h
+        [Inertia(memory=HalfLife(h), transform=:log1p)]
+    end
+    @test prof.aic[1] ≈ aic(fit5) + 2
+    # a failing grid value is recorded, not fatal
+    failing = @test_logs (:warn, r"failed") match_mode=:any profile_memory(
+        h -> [Inertia(memory=HalfLife(h), transform=:log1p)], events, n, [5.0, -1.0])
+    @test isnan(failing.loglik[2]) && !failing.converged[2] && failing.best[1]
+end
+
+@testset "Measures from the second review round" begin
+    h = build_history([Event(1, 2, 1.0), Event(1, 2, 2.0), Event(1, 3, 3.0),
+                       Event(3, 2, 4.0)])
+    # intensity: events per distinct partner (Vu et al. 2017)
+    @test compute(OutdegreeSender(measure=:intensity), h, 1, 4, 5.0) == 1.5
+    @test compute(OutdegreeSender(measure=:intensity), h, 4, 1, 5.0) == 0.0
+    @test name(OutdegreeSender(measure=:intensity)) == "outdegreeSender.intensity"
+    @test_throws ArgumentError OutdegreeSender(measure=:intensity, scaling=:prop)
+    @test compute(DegreeAssortativity(measure=:partners), h, 1, 2, 5.0) == 2.0 * 2.0
+    # the harmonic combination of two legs: 2ab/(a + b)
+    @test compute(OTP(combine=:harmonic), h, 1, 2, 5.0) ≈ 2 * 1 * 1 / 2
+    hh = build_history([Event(1, 3, 1.0), Event(1, 3, 2.0), Event(1, 3, 2.5), Event(3, 2, 3.0)])
+    @test compute(OTP(combine=:harmonic), hh, 1, 2, 4.0) ≈ 2 * 3 * 1 / 4
+    # tertius diversity: Shannon entropy of the neighbours' categories
+    party = [:x, :green, :red, :x, :green]
+    ht = build_history([Event(2, 4, 1.0), Event(3, 4, 2.0), Event(5, 4, 3.0)])
+    p = [2 / 3, 1 / 3]
+    @test compute(TertiusEffect(party; aggregate=:entropy), ht, 1, 4, 4.0) ≈ -sum(p .* log.(p))
+    @test_throws ArgumentError TertiusEffect([1.0, 2.0, 3.0]; aggregate=:entropy)
+    @test_throws ArgumentError TertiusEffect(party; aggregate=:mean)
+    @test_throws ArgumentError TertiusEffect(party; aggregate=:entropy, difference=true)
+    # :sd without cancellation for large values with a small spread
+    big = [0.0, 1e9, 1e9 + 1, 0.0, 0.0]
+    hb = build_history([Event(2, 4, 1.0), Event(3, 4, 2.0)])
+    @test compute(TertiusEffect(big; aggregate=:sd), hb, 1, 4, 3.0) ≈ 0.5
+    # a similarity function sees the categories, not their codes
+    seen = Any[]
+    sim = (a, b) -> (push!(seen, (a, b)); 1.0)
+    compute(MatchedDegree(party; similarity=sim), ht, 1, 4, 4.0)
+    @test all(x -> x[1] isa Symbol && x[2] isa Symbol, seen)
+    # split_by_type takes a single type
+    @test name.(split_by_type(Reciprocation, :praise)) == ["reciprocity[types=praise]"]
+end
+
+@testset "Review: a statistic reads only the past of its evaluation time" begin
+    h = build_history([Event(1, 2, 1.0), Event(1, 2, 3.0), Event(2, 1, 4.0)])
+    @test compute(Inertia(), h, 1, 2, 2.0) == 1.0            # the event at 3 is later
+    @test compute(Inertia(memory=HalfLife(1.0)), h, 1, 2, 2.0) == 0.5
+    @test compute(Inertia(memory=Window(5.0)), h, 1, 2, 2.0) == 1.0
+    @test compute(TimeSince(:dyad; transform=identity), h, 1, 2, 2.0) == 1.0
+    @test compute(PShiftABAB(), h, 1, 2, 2.0) == 1.0         # the last event by t = 2
+    @test compute(UndirectedPShift(:AB_AB), h, 2, 1, 3.5) == 1.0
+    @test compute(Inertia(), h, 1, 2, 0.5) == 0.0
+    @test compute(Inertia(), h, 1, 2, 3.0) == 2.0            # an event at t counts
+    # the same statistic evaluated forwards, backwards and forwards again
+    stat = OTP(memory=HalfLife(2.0))
+    vals = [compute(stat, h, 1, 1, t) for t in (5.0, 2.0, 5.0)]
+    @test vals[1] == vals[3]
+    @test_throws ArgumentError compute(Inertia(), build_history([Event(1, 2, 3.0),
+                                                                 Event(2, 1, 1.0)]), 1, 2, 4.0)
+    @test_throws ArgumentError compute(Inertia(), build_history([Event(1, 2, NaN)]), 1, 2, 4.0)
+    @test_throws ArgumentError compute(Inertia(), h, 1, 2, NaN)
+end
+
+@testset "Review: half-life memory on a far-negative clock" begin
+    events = [Event(1, 2, 1.0), Event(1, 3, 2.0), Event(1, 2, 4.0), Event(2, 1, 5.0)]
+    shifted = [Event(e.sender, e.receiver, e.time - 1.0e5) for e in events]
+    for stat in (Inertia(memory=HalfLife(7.0)), OutdegreeSender(memory=HalfLife(7.0)),
+                 Inertia(memory=HalfLife(7.0), scaling=:prop, empty=-1.0),
+                 OutdegreeSender(memory=HalfLife(7.0), scaling=:prop, empty=-1.0))
+        a = compute(stat, build_history(events), 1, 2, 6.0)
+        b = compute(stat, build_history(shifted), 1, 2, 6.0 - 1.0e5)
+        @test isfinite(b) && b ≈ a
+    end
+end
+
+@testset "Review: the Kolmogorov p-value is calibrated" begin
+    # inertia and reciprocity are strongly correlated within risk sets; the old
+    # √(I⁻¹)ₖₖ scaling rejected these true models about a third of the time
+    stats = [Inertia(transform=:log1p), Reciprocation(transform=:log1p)]
+    rejections = 0
+    for seed in 1:40
+        ev = simulate_events(stats, [1.0, 1.0], 6, 200; rng=Xoshiro(seed))
+        t = score_process_test(fit_revel(ev, stats, 6); n_sim=1, rng=Xoshiro(seed))
+        rejections += any(t.p_kolmogorov[1:2] .< 0.05)
+    end
+    @test rejections <= 6
+    # … and so are the resampling p-value and the score test: 40 data sets from
+    # the fitted model, at most 8 rejections at 5 % each (a binomial(40, 0.05)
+    # exceeds 8 with probability 3e-4, while a test that rejected a quarter of
+    # true models would pass with probability 0.03)
+    spt = 0; st = 0
+    for seed in 101:140
+        ev = simulate_events(stats, [1.0, 1.0], 6, 200; rng=Xoshiro(seed))
+        f = fit_revel(ev, stats, 6)
+        spt += score_process_test(f; n_sim=99, rng=Xoshiro(seed)).p_value[end] < 0.05
+        st += score_test(f, [OTP(transform=:log1p)]).p_value[1] < 0.05
+    end
+    @test spt <= 8 && st <= 8
+    # with one statistic the standardised process ends at zero and its scale is
+    # the information's
+    ev = simulate_events(stats[1:1], [1.0], 6, 200; rng=Xoshiro(3))
+    fit = fit_revel(ev, stats[1:1], 6)
+    table, process = score_process_test(fit; n_sim=10, rng=Xoshiro(1), return_process=true)
+    @test abs(process[end, 1]) < 1e-6
+    @test table.statistic[1] ≈ maximum(abs, process[:, 1])
+end
+
+@testset "Review: Efron ties in the event diagnostics" begin
+    stats = [Inertia(transform=:log1p), Reciprocation(transform=:log1p)]
+    base = simulate_events(stats, [0.8, 0.6], 6, 300; rng=Xoshiro(3))
+    coarse = Event{Float64}[]
+    for (k, e) in enumerate(base)
+        tie = k > 1 && iseven(k) &&
+              (e.sender, e.receiver) != (base[k - 1].sender, base[k - 1].receiver)
+        push!(coarse, Event(e.sender, e.receiver, tie ? coarse[end].time : Float64(k)))
+    end
+    for engine in (:relevent, :design)
+        fit = fit_revel(coarse, stats, 6; ties=:efron, engine=engine)
+        d = event_diagnostics(fit)
+        # the deviance residuals add up to the fitted deviance under Efron too
+        @test sum(d.deviance_residual) ≈ -2loglikelihood(fit)
+        @test all(0 .< d.probability .<= 1)
+        # the null model's residual uses the Efron-weighted risk-set size
+        @test any(d.null_residual .< 2log(30) - 1e-9) && all(d.null_residual .<= 2log(30) + 1e-12)
+        s = prediction_summary(fit)
+        @test s.deviance ≈ -2loglikelihood(fit)
+    end
+end
+
+@testset "Review: goodness of fit for undirected events" begin
+    stats = [Inertia(symmetric=true, transform=:log1p), SharedPartners(transform=:log1p)]
+    ev = simulate_events(stats, [1.0, 0.3], 6, 200; directed=false, rng=Xoshiro(4))
+    # store half of the pairs the other way round: nothing may depend on it
+    flipped = [isodd(k) ? Event(e.receiver, e.sender, e.time) : e for (k, e) in enumerate(ev)]
+    fit = fit_revel(flipped, stats, 6; directed=false)
+    @test coef(fit) ≈ coef(fit_revel(ev, stats, 6; directed=false)) atol = 1e-10
+    result = gof(fit; n_sim=40, rng=Xoshiro(5))
+    @test [s.name for s in result.statistics] ==
+          ["mechanism shares (undirected)", "degree concentration (undirected)",
+           "closing times (events)"]
+    p = reduce(vcat, [s.p_values for s in result.statistics])
+    @test count(p .< 0.05) <= 2              # a correctly specified model
+    # directed layers on undirected data read the pair in ID order, not in the
+    # order the pair was stored
+    @test coef(fit_revel(flipped, [Inertia(transform=:log1p)], 6; directed=false)) ≈
+          coef(fit_revel(ev, [Inertia(transform=:log1p)], 6; directed=false)) atol = 1e-10
+end
+
+@testset "Review: wrappers keep their own arguments" begin
+    stats = [Inertia(transform=:log1p)]
+    ev = simulate_events(stats, [1.0], 5, 120; rng=Xoshiro(1))
+    @test_throws ArgumentError fit_stratified(ev, stats, 5; by=e -> e.time <= 60, cases=1:120)
+    @test_throws ArgumentError fit_moving_window(ev, stats, 5; width=40.0, cases=1:120)
+    @test_throws ArgumentError fit_receiver_choice(ev, stats, 5; riskset=:full)
+end
+
+@testset "Review: strata defined by who acts get their own risk sets" begin
+    n = 8
+    group = [1, 1, 1, 1, 2, 2, 2, 2]
+    x = [0.0, 1.0, 2.0, 0.5, 1.5, 0.0, 2.5, 1.0]
+    truth = [Inertia(transform=:log1p), SendEffect(x; name="x")]
+    ev = simulate_events(truth, [0.8, 0.5], n, 1200; rng=Xoshiro(9))
+    fits = fit_stratified(ev, truth, n; by=e -> group[e.sender])
+    for g in (1, 2)
+        fit = fits[g]
+        # the dyads that could have produced an event of this stratum: the
+        # group's four senders times seven receivers
+        @test all(fit.fit.risk_set_sizes .== 4 * (n - 1))
+        @test abs(coef(fit)[2] - 0.5) < 4 * stderror(fit)[2]
+    end
+    # a stratifier that does not depend on the dyad keeps the full risk set
+    early = fit_stratified(ev, truth, n; by=e -> e.time <= 600)
+    @test all(early[true].fit.risk_set_sizes .== n * (n - 1))
+end
+
+@testset "Review: missing covariate values are refused" begin
+    @test_throws ArgumentError Covariate([missing, 1, 2])
+    @test_throws ArgumentError MatchEffect([missing, missing, "a"])
+    @test_throws ArgumentError Covariate([0.0, 1.0], [1.0 missing; 2.0 3.0])
+end
+
+@testset "Review: hyperevents with actors who join during the sequence" begin
+    events = [HyperEvent([1], [2, 3], 1.0), HyperEvent([2], [1, 3], 2.0),
+              HyperEvent([5], [1, 4], 3.0), HyperEvent([4], [5, 1], 4.0)]
+    # actor 5 joins at t = 3
+    at_risk = (m, e) -> e.time < 3 ? (1:4) : (1:5)
+    d = hyper_design(events, [HyperReciprocation()], 5; n_controls=50, actors=at_risk)
+    # the sender is fixed: C(3,2) = 3 receiver pairs among the other actors of
+    # 1–4, then C(4,2) = 6 among the other actors of 1–5
+    @test d.risk_set_size[d.is_event] == [3, 3, 6, 6]
+    @test all(r -> all(<=(4), r), d.receivers[d.stratum .<= 2])
+    # an event involving an actor who is not yet at risk is refused
+    @test_throws ArgumentError hyper_design(events, [HyperReciprocation()], 5;
+                                            actors=(m, e) -> 1:4)
+end
+
+# ----------------------------------------------------------------------------
 # The concordance, the documentation and the namespace
 # ----------------------------------------------------------------------------
 
@@ -1410,7 +1973,15 @@ end
     end
     # the equivalences the review singles out as traps
     lookup(col, value) = only(cat[cat[!, col] .== value, :revel])
-    @test lookup(:relevent, "FrPSndSnd") == "Inertia(scaling=:prop, empty=1/(n-1))"
+    @test lookup(:relevent, "FrPSndSnd †") == "Inertia(scaling=:prop, empty=1/(n-1))"
+    # relevent's three names whose 1.2.1 output departs from their documentation
+    # are marked, and no cell claims what the package refuses
+    @test sort(filter(x -> endswith(x, "†"), cat.relevent)) == ["FrPSndSnd †", "FrRecSnd †", "OSPSnd †"]
+    @test !any(occursin("\"interact\"", c) for c in cat.remstats)
+    # the zero-history share differs between relevent (1/(n-1)) and remstats (1/n)
+    @test lookup(:relevent, "NODSnd") == "OutdegreeSender(scaling=:prop, empty=1/(n-1))"
+    @test lookup(:remstats, "outdegreeSender(scaling = \"prop\")") ==
+          "OutdegreeSender(scaling=:prop, empty=1/n)"
     @test lookup(:remstats, "inertia()") == "Inertia()"
     @test lookup(:goldfish, "commonReceiver") == "OSP(combine=:count)"
     @test lookup(:goldfish, "commonSender") == "ISP(combine=:count)"
@@ -1470,11 +2041,12 @@ end
     end
     @test isempty(undocumented)
     @test isempty(missing_example)
-    failed = String[]
+    failed = String[]; wrong = String[]; claims = 0
     for (nm, block) in blocks
         mod = Module()
         try
-            Core.eval(mod, Meta.parseall(block))
+            c, bad = check_block(mod, block; where="docstring of $nm")
+            claims += c; append!(wrong, bad)
         catch err
             @error "docstring example of $nm failed" exception = (err, catch_backtrace())
             push!(failed, nm)
@@ -1482,6 +2054,38 @@ end
     end
     @test isempty(failed)
     @test length(blocks) >= 90
+    # … and the values their comments state are the values they compute
+    foreach(w -> @error(w), wrong)
+    @test isempty(wrong)
+    @test claims >= 250
+end
+
+@testset "Guide pages run, and the values they state hold" begin
+    # Every Julia block of the README and of the documentation pages runs, one
+    # module per page (the pages' own `@example` scoping), and every `# value`
+    # comment is checked as for the docstrings
+    root = pkgdir(Revel)
+    pages = [joinpath(root, "README.md");
+             joinpath.(root, "docs", "src", ["index.md", "getting_started.md"]);
+             [joinpath(root, "docs", "src", "guide", f)
+              for f in readdir(joinpath(root, "docs", "src", "guide")) if endswith(f, ".md")]]
+    claims = 0; blocks = 0
+    for page in pages
+        mod = Module()
+        Core.eval(mod, :(using Revel))
+        for m in eachmatch(r"```(?:julia|@example[^\n]*)\n(.*?)```"s, read(page, String))
+            blocks += 1
+            c, bad = Base.CoreLogging.with_logger(Base.CoreLogging.NullLogger()) do
+                redirect_stdout(devnull) do
+                    check_block(mod, m.captures[1]; where=basename(page))
+                end
+            end
+            claims += c
+            foreach(w -> @error(w), bad)
+            @test isempty(bad)
+        end
+    end
+    @test blocks >= 80 && claims >= 90
 end
 
 @testset "Namespace" begin
@@ -1670,8 +2274,8 @@ end
     @test compute(SubsetRepetition(2; memory=Window(3.0)), h, [2, 3], none, 6.0) == 2.0
     @test compute(SubsetRepetition(2; memory=Window(3.0)), h, [1, 2], none, 6.0) == 1.0
     # interval (1, 4] keeps e2 and e3 only (e4 is exactly 1 old: excluded)
-    @test compute(SubsetRepetition(2; memory=Interval(1.0, 4.0)), h, [1, 2], none, 6.0) == 1.0
-    @test compute(SubsetRepetition(2; memory=Interval(1.0, 4.0)), h, [2, 3], none, 6.0) == 1.0
+    @test compute(SubsetRepetition(2; memory=IntervalMemory(1.0, 4.0)), h, [1, 2], none, 6.0) == 1.0
+    @test compute(SubsetRepetition(2; memory=IntervalMemory(1.0, 4.0)), h, [2, 3], none, 6.0) == 1.0
     # linear decay over 10: (1 − 5/10) + (1 − 4/10) + (1 − 1/10) = 2.0
     @test compute(SubsetRepetition(2; memory=LinearDecay(10.0)), h, [1, 2], none, 6.0) ≈ 2.0
     # power law, exponent 1: 1/5 + 1/4 + 1/1 = 1.45
@@ -2158,7 +2762,10 @@ end
     events = [HyperEvent([1], [2, 3], 1.0), HyperEvent([2], [1], 2.0),
               HyperEvent([1], [2, 3], 3.0)]
     stats = [SenderReceiverSetRepetition(1), HyperReciprocation()]
-    design = hyper_design(events, stats, 5; n_controls=6, rng=Xoshiro(21))
+    # directed hyperevents default to the sender-stratified design of Lerner &
+    # Lomi (2023); the uniform design is asked for by name
+    @test hyper_design(events, stats, 5; n_controls=6, rng=Xoshiro(21)).risk_set_size[1] == 6
+    design = hyper_design(events, stats, 5; n_controls=6, rng=Xoshiro(21), sampler=:uniform)
     # C(5,1)·C(4,2) = 30 hyperedges with one sender and two receivers; C(5,1)·C(4,1) = 20
     @test design.risk_set_size[design.is_event] == [30, 20, 30]
     @test design.sampling_prob[design.is_event] ≈ [6 / 29, 6 / 19, 6 / 29]
@@ -2178,7 +2785,7 @@ end
     @test design[design.is_event, "reciprocation"] == [0.0, 1.0, 0.5]
 
     # full enumeration
-    full = hyper_design(events, stats, 5; n_controls=29)
+    full = hyper_design(events, stats, 5; n_controls=29, sampler=:uniform)
     @test [count(full.stratum .== m) for m in 1:3] == [30, 20, 30]
     @test allunique(collect(zip(full.senders, full.receivers))[full.stratum .== 1])
 
@@ -2343,7 +2950,7 @@ end
              HyperReciprocation(transform=:log1p),
              ReceiverSetRepetition(2; transform=:log1p)]
     events = simulate_hyperevents(stats, truth, 5, 600; sizes=[(1, 2), (1, 3)], rng=Xoshiro(5))
-    fit = fit_rhem(events, stats, 5; n_controls=30, rng=Xoshiro(6))
+    fit = fit_rhem(events, stats, 5; n_controls=30, rng=Xoshiro(6), sampler=:uniform)
     @test fit.fit.converged
     @test all(abs.(coef(fit) .- truth) .< 4 .* stderror(fit))
     @test Set(fit.fit.risk_set_sizes) == Set([30, 20])
@@ -2387,16 +2994,22 @@ end
     end
 
     # … and the fits agree: with every alternative enumerated (5·4 = 20 dyads) the
-    # hyperevent design is the full dyadic risk set
+    # uniform hyperevent design is the full dyadic risk set, and the default
+    # sender-stratified one is the receiver-choice model
     dstats = [Inertia(transform=:log1p), Reciprocation(transform=:log1p)]
     hstats = [DirectedSubsetRepetition(1, 1; transform=:log1p),
               HyperReciprocation(transform=:log1p)]
     dfit = fit_revel(dyadic, dstats, 5)
-    hfit = fit_rhem(hyper, hstats, 5; n_controls=19)
+    hfit = fit_rhem(hyper, hstats, 5; n_controls=19, sampler=:uniform)
     @test coef(hfit) ≈ coef(dfit) atol = 1e-6
     @test stderror(hfit) ≈ stderror(dfit) atol = 1e-6
     @test loglikelihood(hfit) ≈ loglikelihood(dfit) atol = 1e-6
     @test nobs(hfit) == nobs(dfit) == 80
+    cfit = fit_rhem(hyper, hstats, 5; n_controls=19)
+    @test cfit.sampler === :receivers
+    choice = fit_receiver_choice(dyadic, dstats, 5)
+    @test coef(cfit) ≈ coef(choice) atol = 1e-6
+    @test loglikelihood(cfit) ≈ loglikelihood(choice) atol = 1e-6
 
     # Undirected hyperevents with two participants are undirected dyadic events
     und = simulate_events([Inertia(symmetric=true, transform=:log1p)], [1.0], 5, 80;
@@ -2418,6 +3031,53 @@ end
     pfit = fit_rhem(pairs2, [ExactRepetition(transform=:log1p)], 5; n_controls=9)
     @test coef(pfit) ≈ coef(ufit) atol = 1e-6
     @test loglikelihood(pfit) ≈ loglikelihood(ufit) atol = 1e-6
+end
+
+@testset "Hyperevents: the worked examples of Lerner & Lomi (2023)" begin
+    # Figures 2–7 of Lerner & Lomi (2023, pp. 9–12): each figure gives a past
+    # and a candidate hyperevent and the value of one statistic, computed by hand
+    # in the paper. Actors A–G are 1–7.
+    A, B, C, D, E, F, G = 1:7
+    # Fig. 2 — partial receiver-set repetition of orders 1, 2, 3
+    h = build_hyper_history([HyperEvent([A], [B, C, D, E], 1.0)])
+    @test [compute(ReceiverSetRepetition(p), h, [A], [C, D, E, F], 2.0) for p in 1:3] ≈
+          [3 / 4, 3 / 6, 1 / 4]
+    @test all(iszero, [compute(SenderReceiverSetRepetition(p), h, [G], [C, D, E, F], 2.0)
+                       for p in 1:3])
+    # Fig. 3 — interaction among receivers of orders 1 and 2
+    h = build_hyper_history([HyperEvent([A], [C, D, E], 1.0)])
+    @test [compute(InteractionAmongReceivers(p), h, [F], [A, B, C, D], 2.0) for p in 1:2] ≈
+          [2 / 12, 1 / 12]
+    # Fig. 4 — reciprocation and out-in popularity
+    h = build_hyper_history([HyperEvent([A], [D, E, F], 1.0), HyperEvent([B], [A, C], 2.0)])
+    @test compute(HyperReciprocation(), h, [D], [A, B, C], 3.0) ≈ 1 / 3
+    @test compute(OutInPopularity(), h, [D], [A, B, C], 3.0) ≈ 2 / 3
+    # Fig. 5 — transitive and cyclic closure
+    h = build_hyper_history([HyperEvent([A], [B, C], 1.0), HyperEvent([C], [D, E], 2.0)])
+    @test compute(HyperClosure(:transitive), h, [A], [D, E], 3.0) ≈ 1.0
+    @test compute(HyperClosure(:cyclic), h, [E], [A, F], 3.0) ≈ 1 / 2
+    # Figs. 6 and 7 — incoming and outgoing balance
+    h = build_hyper_history([HyperEvent([C], [A, B], 1.0), HyperEvent([C], [D, E], 2.0)])
+    @test compute(HyperClosure(:shared_senders), h, [A], [D, E], 3.0) ≈ 1.0
+    h = build_hyper_history([HyperEvent([A], [B, C], 1.0), HyperEvent([E], [C, D], 2.0)])
+    @test compute(HyperClosure(:shared_receivers), h, [A], [D, E], 3.0) ≈ 1 / 2
+
+    # Lerner et al. (2021): covariate homogeneity of a binary covariate, by its
+    # definition, for every split of hyperedges of sizes 2–5
+    xhom(k, n) = (v = abs(n - 2k) / n; isodd(n) ? (v - 1 / n) / (1 - 1 / n) : v)
+    none = HyperHistory{Float64}()
+    for n in 2:5, k in 0:n
+        x = [ones(k); zeros(n - k)]
+        @test compute(HyperCovariate(x; aggregate=:homogeneity), none, collect(1:n),
+                      Int[], 0.0) ≈ xhom(k, n) atol = 1e-12
+    end
+    @test_throws ArgumentError HyperCovariate([0.0, 2.0]; aggregate=:homogeneity)
+    # Lerner & Hâncean (2023): prior success disparity, the sample sd of the
+    # members' summed outcomes
+    papers = build_hyper_history([HyperEvent([1, 2], 1.0; weight=10.0),
+                                  HyperEvent([2, 3], 2.0; weight=4.0)])
+    @test compute(SubsetRepetition(1; weighted=true, aggregate=:samplesd), papers,
+                  [1, 2, 3], Int[], 3.0) ≈ std([10.0, 14.0, 4.0])
 end
 
 @testset "Hyperevents: the fit wrapper" begin
@@ -2447,9 +3107,21 @@ end
     @test Networks.se_method(fit) === :hessian
     @test Networks.tie_method(fit) === :none
     @test Networks.missing_method(fit) == Networks.missing_method(fit.fit)
-    @test Networks.approximations(fit) == Networks.approximations(fit.fit)
+    # REM's sampling note speaks of dyads and suggests a full risk set; the
+    # hyperevent fit says it in hyperedges and leaves the other notes alone
+    notes = Networks.approximations(fit)
+    @test length(notes) == length(Networks.approximations(fit.fit))
+    @test any(occursin("case-control sampling of hyperedges", x) for x in notes)
+    @test !any(occursin("control_draw_cov", x) || occursin("dyad", x) for x in notes)
+    for (what, call) in ["event_diagnostics" => () -> event_diagnostics(fit),
+                         "prediction_summary" => () -> prediction_summary(fit),
+                         "score_process_test" => () -> score_process_test(fit),
+                         "score_test" => () -> score_test(fit, stats[1:1])]
+        @test_throws ArgumentError call()
+    end
     @test Networks.fit_metadata(fit) isa Networks.ResultMetadata
-    @test occursin("relational hyperevent model", sprint(show, fit))
+    @test occursin("relational hyperevent model", sprint(show, MIME"text/plain"(), fit))
+    @test !occursin("control_draw_cov", sprint(show, MIME"text/plain"(), fit))
 
     # the fit is the conditional logit of its own design
     design = hyper_design(events, stats, 7; n_controls=15, rng=Xoshiro(11))
@@ -2494,7 +3166,7 @@ end
     d = permutedims(reshape(Float64.(g.values["covariate_d"]), n, n))   # stored row-major
     window = Window(g.values["window_width"])
     decay = HalfLife(g.values["decay_halflife"])
-    interval = Interval(g.values["interval_lo"], g.values["interval_hi"])
+    interval = IntervalMemory(g.values["interval_lo"], g.values["interval_hi"])
 
     # The fixture's layout: event-major, then dyads sender 1..n, receiver 1..n,
     # sender != receiver (directed) or (i, j), i < j (undirected). Each row is
@@ -2618,7 +3290,7 @@ end
 
     # ---- memory = "window" and "interval" ---------------------------------------
     # remstats keeps an event of age a when a <= width ("window") and when
-    # lo < a <= hi ("interval"): exactly `Window` and `Interval`. The time grid
+    # lo < a <= hi ("interval"): exactly `Window` and `IntervalMemory`. The time grid
     # makes ages equal to the width and to both interval bounds occur.
     # Ranks, recencies and participation shifts ignore the memory in both packages.
     memory_effects(memory) = [
@@ -2632,8 +3304,8 @@ end
         "otp_unique" => OTP(memory=memory, combine=:count),
         "inertia_prop" => Inertia(memory=memory, scaling=:prop, empty=p_dyad),
         "outdegreeSender_prop" => OutdegreeSender(memory=memory, scaling=:prop, empty=p_node),
-        "rrankSend" => RecencyRank(:send; memory=memory),
-        "recencyContinue" => TimeSince(:dyad; memory=memory),
+        "rrankSend" => RecencyRank(:send),               # takes no memory
+        "recencyContinue" => TimeSince(:dyad),           # takes no memory
         "psABBA" => PShift(:AB_BA)]
     for (key, stat) in memory_effects(window)
         parity("window_" * key, stat)
@@ -2779,10 +3451,33 @@ end
     decay_parity("weighted_decay_outdegreeSender", OutdegreeSender(weighted=true, memory=decay);
                  evs=weighted_events)
 
+    # ---- products and event attributes (remstats `a:b`, `event()`) ---------------
+    parity("full_send_x_x_receive_x", ProductEffect(x, x))
+    # remstats' event(z) is the attribute of the event being explained, constant
+    # over its risk set: a GlobalEffect stepping at the event times
+    z = Float64.(g.values["event_z"])
+    parity("event_z_x_inertia", Interaction(Inertia(), GlobalEffect(times, z)))
+
+    # ---- event types: consider_type = "separate" is one statistic per past type --
+    types = Symbol.(g.values["input_type"])
+    typed_events = [Event(s, r, t; eventtype=ty)
+                    for (s, r, t, ty) in zip(senders, receivers, times, types)]
+    for ty in (:a, :b), (key, stat) in [
+            "inertia" => Inertia(types=ty), "reciprocity" => Reciprocation(types=ty),
+            "otp" => OTP(types=ty), "outdegreeSender" => OutdegreeSender(types=ty)]
+        k = "typed_$(key)_$(ty)"
+        push!(covered, k)
+        @test Networks.check_golden(g, k, via_history(stat, typed_events))
+        # REM's event log carries no types, so the REM interface refuses it
+        @test_throws ArgumentError via_state(stat, typed_events)
+    end
+    @test Networks.check_golden(g, "typed_inertia_a",
+                                via_history(split_by_type(Inertia, [:a, :b])[1], typed_events))
+
     # Every statistic array in the fixture is asserted above
     arrays = [k for (k, v) in g.values if v isa AbstractVector &&
               length(v) in (length(events) * n_dyads, length(events) * n_dyads ÷ 2)]
-    @test length(arrays) == 131
+    @test length(arrays) == 141
     @test isempty(setdiff(arrays, covered))
     @test isempty(setdiff(covered, arrays))
 end
