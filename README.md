@@ -217,6 +217,21 @@ The package implements the effect catalogue of a scoping review of 210 works on
 relational event models; `docs/src/guide/literature.md` summarises it and
 `docs/references.bib` holds the bibliography.
 
+## Citation
+
+If you use Revel.jl in your work, please cite it using the entry in
+[`CITATION.bib`](CITATION.bib):
+
+```biblatex
+@misc{SNWJRevelJL,
+  author = {Santoni, Simone},
+  title = {Revel.jl: Relational Event Effects, Interactions and Diagnostics for Julia},
+  year = {2026},
+  url = {https://github.com/statistical-network-analysis-with-Julia/Revel.jl},
+  note = {Homepage: https://statistical-network-analysis-with-Julia.github.io/Revel.jl; GitHub: https://github.com/statistical-network-analysis-with-Julia}
+}
+```
+
 ## License
 
 MIT License — see [LICENSE](LICENSE).

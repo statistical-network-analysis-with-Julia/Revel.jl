@@ -90,6 +90,23 @@ prediction_summary(better).recall      # share of calls ranked in the top 1, 5, 
 <p>Revel.jl hosts no optimizer and no likelihood of its own: models are fitted by <code>Relevent.fit_obpm</code>, <code>Relevent.fit_timing</code> and <code>REM.fit_rem</code>, on the shared <code>Networks.newton_fit</code>. Random effects, smooth (non-linear) effects, a dyad × type risk set, events with duration and the sender-rate step of actor-oriented models are <strong>not implemented</strong>; the <a href="guide/concordance/">concordance</a> lists what is not implemented and what to use instead.</p>
 ```
 
+## Citation
+
+If you use Revel.jl in your work, please cite it using the entry in
+[`CITATION.bib`](https://github.com/statistical-network-analysis-with-Julia/Revel.jl/blob/main/CITATION.bib):
+
+```biblatex
+@misc{SNWJRevelJL,
+  author = {Santoni, Simone},
+  title = {Revel.jl: Relational Event Effects, Interactions and Diagnostics for Julia},
+  year = {2026},
+  url = {https://github.com/statistical-network-analysis-with-Julia/Revel.jl},
+  note = {Homepage: https://statistical-network-analysis-with-Julia.github.io/Revel.jl; GitHub: https://github.com/statistical-network-analysis-with-Julia}
+}
+```
+
+## Module
+
 ```@docs
 Revel
 ```
