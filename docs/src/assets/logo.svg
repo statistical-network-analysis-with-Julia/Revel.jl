@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">Revel.jl</title>
+  <desc id="desc">Two past interactions through a third actor and the event that closes them: an effect read off the event history.</desc>
+  <path d="M66 172 113 84M143 84 190 172" fill="none" stroke="#4063D8" stroke-width="12" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M84 196H162" fill="none" stroke="#9558B2" stroke-width="13" stroke-linecap="round" stroke-dasharray="4 24"/>
+  <path d="M150 178 170 196 150 214" fill="none" stroke="#9558B2" stroke-width="11" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="128" cy="58" r="24" fill="#9558B2"/>
+  <circle cx="52" cy="196" r="24" fill="#CB3C33"/>
+  <circle cx="204" cy="196" r="24" fill="#389826"/>
+</svg>
